@@ -3,11 +3,11 @@ UC2 Stub - Subsidies RAG System
 A minimal stub showing the flow for generic query → semantic search → LLM answer → response
 """
 
-from fastapi import FastAPI
+from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Optional, List
 
-app = FastAPI()
+router = APIRouter()
 
 
 # Request/Response Models
@@ -79,29 +79,7 @@ def process_uc2_request(request: UC2Request) -> UC2Response:
 
 
 # FastAPI Endpoint
-@app.post("/uc2/answer", response_model=UC2Response)
+@router.post("/uc2/answer", response_model=UC2Response)
 async def uc2_answer_endpoint(request: UC2Request):
     """UC2 endpoint: Accepts question/dialog, returns answer + source URIs"""
     return process_uc2_request(request)
-
-
-if __name__ == "__main__":
-    import sys
-    import json
-    
-    # If running as server: python subsidies_stub.py --server
-    if "--server" in sys.argv:
-        import uvicorn
-        print("Starting UC2 stub server on http://localhost:8000")
-        print("Test with: curl -X POST http://localhost:8000/uc2/answer -H 'Content-Type: application/json' -d '{\"question\": \"What subsidies exist?\"}'")
-        uvicorn.run(app, host="0.0.0.0", port=8000)
-    else:
-        # Run stub pipeline with a sample request (no server)
-        req = UC2Request(
-            question="What subsidies exist for renovating an older home?",
-            filters={"subsidiesOnly": True},
-            top_n=5,
-            min_score=0.35,
-        )
-        resp = process_uc2_request(req)
-        print(json.dumps(resp.model_dump(), indent=2))

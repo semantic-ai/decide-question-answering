@@ -1,3 +1,7 @@
+deprecated
 fastapi
-uvicorn
+jsonapi-pydantic
 pydantic
+rdflib
+sparqlwrapper
+uvicorn
