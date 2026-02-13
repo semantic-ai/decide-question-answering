@@ -1,91 +1,85 @@
-import os
-from importlib import import_module
-import builtins
+"""
+UC2 Stub - Subsidies RAG System
+A minimal stub showing the flow for generic query → semantic search → LLM answer → response
+"""
 
-from fastapi import FastAPI, APIRouter
-from typing import Mapping, Any
-from fastapi.responses import Response
-from jsonapi_pydantic.v1_0 import Error, TopLevel, Meta, Source, ErrorLinks
-from starlette.exceptions import HTTPException as StarletteHTTPException
-from rdflib.namespace import Namespace
+from fastapi import APIRouter
+from pydantic import BaseModel
+from typing import Optional, List
 
-import helpers
-from escape_helpers import sparql_escape
-
-# WSGI variable name used by the server
-app = FastAPI()
+router = APIRouter()
 
 
-class BaseHTTPException(StarletteHTTPException):
-    """
-    Implementation of JSONAPI compliant error responses with provided status code (400 by default) using the
-    default FASTAPI Error mechanism
-
-    Response object documentation: https://flask.palletsprojects.com/en/1.1.x/api/#response-objects
-    The kwargs can be any other key supported by JSONAPI error objects: https://jsonapi.org/format/#error-objects
-    """
-
-    def __init__(
-            self,
-            status_code: int=400,
-            detail: str | None = None,
-            headers: Mapping[str, str] | None = None,
-            id: Any | None = None,
-            links: ErrorLinks | None = None,
-            code: str | None = None,
-            title: str | None = None,
-            source: Source | None = None,
-            meta: Meta | None = None
-    ) -> None:
-        super().__init__(status_code, detail, headers)
-        self.id = id
-        self.links = links
-        self.code = code
-        self.title = title
-        self.source = source
-        self.meta = meta
+# Request/Response Models
+class UC2Request(BaseModel):
+    question: str
+    dialog: Optional[List[dict]] = None
+    filters: Optional[dict] = None
+    top_n: Optional[int] = 5
+    min_score: Optional[float] = 0.35
 
 
-@app.exception_handler(BaseHTTPException)
-async def http_exception_handler(request, exc):
-    error_object = TopLevel(
-        errors=[
-            Error(
-                detail=str(exc.detail),
-                status=exc.status_code,
-                id=exc.id,
-                links=exc.links,
-                code=exc.code,
-                title=exc.title,
-                source=exc.source,
-                meta=exc.meta
-            )
-        ]
-    )
-    headers = exc.headers or {}
-    headers['Content-Type'] = 'application/vnd.api+json'
-    return Response(
-        content=error_object.model_dump_json(), status_code=exc.status_code, headers=headers
-    )
+class SourceDoc(BaseModel):
+    uri: str
+    score: float
+    title: Optional[str] = None
 
-##################
-## Vocabularies ##
-##################
-mu = Namespace('http://mu.semte.ch/vocabularies/')
-mu_core = Namespace('http://mu.semte.ch/vocabularies/core/')
-mu_ext = Namespace('http://mu.semte.ch/vocabularies/ext/')
 
-SERVICE_RESOURCE_BASE = 'http://mu.semte.ch/services/'
+class UC2Response(BaseModel):
+    answer: str
+    sources: List[SourceDoc]
 
-builtins.app = app
-builtins.helpers = helpers
-builtins.sparql_escape = sparql_escape
-builtins.BaseHTTPException = BaseHTTPException
 
-# Import the app from the service consuming the template
-app_file = os.environ.get('APP_ENTRYPOINT')
-module_path = 'ext.app.{}'.format(app_file)
-package = import_module(module_path)
-for value in package.__dict__.values():
-    if isinstance(value, APIRouter):
-        app.include_router(value)
+# Stub Functions
+def semantic_search(query_text: str, filters: Optional[dict], top_n: int) -> List[dict]:
+    """Stub: Semantic search for relevant decisions"""
+    # TODO: Implement real semantic search
+    mock_results = [
+        {"uri": "http://example.org/decisions/123", "score": 0.82, "title": "Decision on renovation subsidy eligibility"},
+        {"uri": "http://example.org/decisions/987", "score": 0.61, "title": "Decision on energy efficiency grants"},
+        {"uri": "http://example.org/decisions/456", "score": 0.45, "title": "Decision on home improvement subsidies"},
+    ]
+    return mock_results[:top_n]
+
+
+def apply_relevance_threshold(docs: List[dict], min_score: float) -> List[dict]:
+    """Stub: Filter documents by relevance threshold"""
+    # TODO: Implement real threshold filtering
+    return [doc for doc in docs if doc.get("score", 0) >= min_score]
+
+
+def generate_answer(question: str, retrieved_docs: List[dict]) -> str:
+    """Stub: Generate answer using LLM with retrieved documents"""
+    # TODO: Implement real LLM generation
+    doc_count = len(retrieved_docs)
+    return f"STUB: Based on {doc_count} retrieved decisions, here is a placeholder answer to: {question}"
+
+
+# Orchestration
+def process_uc2_request(request: UC2Request) -> UC2Response:
+    """Main UC2 pipeline: question → search → LLM → response"""
+    # Step 1: Semantic search
+    filters = request.filters or {}
+    retrieved_docs = semantic_search(request.question, filters, request.top_n or 5)
+    
+    # Step 2: Apply relevance threshold
+    min_score = request.min_score or 0.35
+    filtered_docs = apply_relevance_threshold(retrieved_docs, min_score)
+    
+    # Step 3: Generate answer with LLM
+    answer = generate_answer(request.question, filtered_docs)
+    
+    # Step 4: Format response
+    sources = [
+        SourceDoc(uri=doc["uri"], score=doc["score"], title=doc.get("title"))
+        for doc in filtered_docs
+    ]
+    
+    return UC2Response(answer=answer, sources=sources)
+
+
+# FastAPI Endpoint
+@router.post("/uc2/answer", response_model=UC2Response)
+async def uc2_answer_endpoint(request: UC2Request):
+    """UC2 endpoint: Accepts question/dialog, returns answer + source URIs"""
+    return process_uc2_request(request)

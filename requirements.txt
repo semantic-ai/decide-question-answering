@@ -1,7 +1,0 @@
-deprecated
-fastapi
-jsonapi-pydantic
-pydantic
-rdflib
-sparqlwrapper
-uvicorn
