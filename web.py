@@ -3,18 +3,17 @@ UC2 Stub - Subsidies RAG System
 A minimal stub showing the flow for generic query → semantic search → LLM answer → response
 """
 
-from fastapi import FastAPI
+from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Optional, List
 
-app = FastAPI()
+router = APIRouter()
 
 
 # Request/Response Models
 class UC2Request(BaseModel):
-    question: str
-    dialog: Optional[List[dict]] = None
-    filters: Optional[dict] = None
+    question: str  # Current user question
+    dialog: Optional[List[dict]] = None  # Previous conversation history
     top_n: Optional[int] = 5
     min_score: Optional[float] = 0.35
 
@@ -31,7 +30,7 @@ class UC2Response(BaseModel):
 
 
 # Stub Functions
-def semantic_search(query_text: str, filters: Optional[dict], top_n: int) -> List[dict]:
+def semantic_search(query_text: str, top_n: int) -> List[dict]:
     """Stub: Semantic search for relevant decisions"""
     # TODO: Implement real semantic search
     mock_results = [
@@ -59,8 +58,7 @@ def generate_answer(question: str, retrieved_docs: List[dict]) -> str:
 def process_uc2_request(request: UC2Request) -> UC2Response:
     """Main UC2 pipeline: question → search → LLM → response"""
     # Step 1: Semantic search
-    filters = request.filters or {}
-    retrieved_docs = semantic_search(request.question, filters, request.top_n or 5)
+    retrieved_docs = semantic_search(request.question, request.top_n or 5)
     
     # Step 2: Apply relevance threshold
     min_score = request.min_score or 0.35
@@ -79,29 +77,7 @@ def process_uc2_request(request: UC2Request) -> UC2Response:
 
 
 # FastAPI Endpoint
-@app.post("/uc2/answer", response_model=UC2Response)
+@router.post("/uc2/answer", response_model=UC2Response)
 async def uc2_answer_endpoint(request: UC2Request):
     """UC2 endpoint: Accepts question/dialog, returns answer + source URIs"""
     return process_uc2_request(request)
-
-
-if __name__ == "__main__":
-    import sys
-    import json
-    
-    # If running as server: python subsidies_stub.py --server
-    if "--server" in sys.argv:
-        import uvicorn
-        print("Starting UC2 stub server on http://localhost:8000")
-        print("Test with: curl -X POST http://localhost:8000/uc2/answer -H 'Content-Type: application/json' -d '{\"question\": \"What subsidies exist?\"}'")
-        uvicorn.run(app, host="0.0.0.0", port=8000)
-    else:
-        # Run stub pipeline with a sample request (no server)
-        req = UC2Request(
-            question="What subsidies exist for renovating an older home?",
-            filters={"subsidiesOnly": True},
-            top_n=5,
-            min_score=0.35,
-        )
-        resp = process_uc2_request(req)
-        print(json.dumps(resp.model_dump(), indent=2))
