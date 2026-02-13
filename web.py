@@ -12,9 +12,8 @@ router = APIRouter()
 
 # Request/Response Models
 class UC2Request(BaseModel):
-    question: str
-    dialog: Optional[List[dict]] = None
-    filters: Optional[dict] = None
+    question: str  # Current user question
+    dialog: Optional[List[dict]] = None  # Previous conversation history
     top_n: Optional[int] = 5
     min_score: Optional[float] = 0.35
 
@@ -31,7 +30,7 @@ class UC2Response(BaseModel):
 
 
 # Stub Functions
-def semantic_search(query_text: str, filters: Optional[dict], top_n: int) -> List[dict]:
+def semantic_search(query_text: str, top_n: int) -> List[dict]:
     """Stub: Semantic search for relevant decisions"""
     # TODO: Implement real semantic search
     mock_results = [
@@ -59,8 +58,7 @@ def generate_answer(question: str, retrieved_docs: List[dict]) -> str:
 def process_uc2_request(request: UC2Request) -> UC2Response:
     """Main UC2 pipeline: question → search → LLM → response"""
     # Step 1: Semantic search
-    filters = request.filters or {}
-    retrieved_docs = semantic_search(request.question, filters, request.top_n or 5)
+    retrieved_docs = semantic_search(request.question, request.top_n or 5)
     
     # Step 2: Apply relevance threshold
     min_score = request.min_score or 0.35
