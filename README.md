@@ -1,12 +1,15 @@
-## UC2 Subsidies RAG Stub
+## UC2 Subsidies RAG System
 
-This stub shows the HTTP flow and defines the input/output formats for a simple subsidies RAG (Retrieval-Augmented Generation) system.
+This service implements the HTTP flow for a subsidies RAG (Retrieval-Augmented Generation) system.
 
 The flow is based on the following:
-- Create an HTTP service that accepts a question (or dialog) in JSON format.
-- Take the question and perform a semantic search.
-- Pass the question plus the retrieved decisions (top N, filtered by a relevance threshold) to an LLM to generate a response.
-- Return the generated response together with the URIs of the retrieved decisions.
+- Create an HTTP service that accepts a question in JSON format.
+- Call the embedding service to obtain an embedding for the question.
+- Use the embedding to perform a semantic search and return the top retrieved decisions together with their URIs.
+- Resolve the titles of the retrieved decisions from the SPARQL endpoint.
+- Pass the question plus the retrieved decisions to an LLM to generate a response (currently a stub).
+
+*Note: Relevance scoring and threshold filtering are not yet implemented as the retrieval API does not return per-document scores. The current default is to return the first 3 retrieved documents.*
 
 ### Setup
 
@@ -20,15 +23,35 @@ docker-compose up --build
 curl -X POST http://localhost:8000/uc2/answer -H "Content-Type: application/json" -d "{\"question\": \"What subsidies exist for renovating an older home?\"}"
 ```
 
-Example with dialog context:
-```bash
-curl -X POST http://localhost:8000/uc2/answer -H "Content-Type: application/json" -d "{\"question\": \"What subsidies exist for renovating an older home?\", \"dialog\": [{\"role\": \"user\", \"content\": \"Hello, I need help with home renovation subsidies.\"}, {\"role\": \"assistant\", \"content\": \"Hello! I'd be happy to help you with home renovation subsidies. What would you like to know?\"}]}"
-```
-
 **Format notes:**
 - `question`: The current user question being asked
-- `dialog`: Previous conversation history (optional). Should contain alternating `user`/`assistant` messages and end with an `assistant` message if present
-- The current `question` is separate from `dialog` and represents the new user message
-- *Note: Future changes could include making the current question part of the dialog array for a more chatbot-like experience*
+- `top_n`: Optional number of retrieved documents to include, defaults to `3`
 
-The current implementation is a pure stub: semantic search, thresholding, and LLM answer generation all return mock data to demonstrate the end-to-end flow.
+### Expected input
+
+```json
+{
+  "question": "What subsidies exist for renovating an older home?",
+  "top_n": 3
+}
+```
+
+### Expected output
+
+```json
+{
+  "answer": "STUB: Based on 3 retrieved decisions, here is a placeholder answer to: What subsidies exist for renovating an older home?",
+  "sources": [
+    {
+      "uri": "https://example.org/document/1",
+      "title": "Example title"
+    }
+  ]
+}
+```
+
+The response contains:
+- `answer`: The generated answer text. This is currently a stub response.
+- `sources`: The retrieved source documents used for the answer.
+- `uri`: The document identifier returned by the retrieval API, exposed by this service as `uri`.
+- `title`: The document title resolved from the SPARQL endpoint when available.
