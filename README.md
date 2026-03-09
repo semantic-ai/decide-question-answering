@@ -11,6 +11,10 @@ The flow is based on the following:
 
 *Note: Relevance scoring and threshold filtering are not yet implemented as the retrieval API does not return per-document scores. The current default is to return the first 3 retrieved documents.*
 
+### Disclaimer
+
+This project currently uses direct service-to-service communication. This is a temporary choice while we determine how these AI services should fit within the LBLod paradigm. This approach should be treated as project-specific and should not be copied as a general pattern for other applications.
+
 ### Setup
 
 ```bash
