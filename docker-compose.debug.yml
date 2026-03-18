@@ -9,4 +9,5 @@ services:
       MODE: "development"
       SEARCH_API_URL: "http://search:80/expressions/large-search"
       EMBEDDING_API_URL: "http://embedding:80/embed"
-      SPARQL_ENDPOINT: "http://virtuoso:8890/sparql"
+      SPARQL_ENDPOINT: "http://database:8890/sparql"
+      ALLOW_MU_AUTH_SUDO: "true"
