@@ -1,9 +1,0 @@
-services:
-  api:
-    build: .
-    ports:
-      - "8000:80"
-    volumes:
-      - .:/app
-    environment:
-      MODE: "development"

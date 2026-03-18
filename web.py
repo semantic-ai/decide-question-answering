@@ -1,26 +1,30 @@
 """
-UC2 Stub - Subsidies RAG System
-A minimal stub showing the flow for generic query → semantic search → LLM answer → response
+UC2 Subsidies RAG System
+Flow: question → embedding API → semantic search → top 3 decisions → response
 """
 
+import os
+import requests
 from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Optional, List
 
 router = APIRouter()
 
+SEARCH_API_URL = os.environ.get("SEARCH_API_URL")
+EMBEDDING_API_URL = os.environ.get("EMBEDDING_API_URL")
+SPARQL_ENDPOINT = os.environ.get("SPARQL_ENDPOINT")
+EMBEDDING_VECTOR_PREFIX = "5:50"
+
 
 # Request/Response Models
 class UC2Request(BaseModel):
     question: str  # Current user question
-    dialog: Optional[List[dict]] = None  # Previous conversation history
-    top_n: Optional[int] = 5
-    min_score: Optional[float] = 0.35
+    top_n: Optional[int] = 3
 
 
 class SourceDoc(BaseModel):
     uri: str
-    score: float
     title: Optional[str] = None
 
 
@@ -29,25 +33,114 @@ class UC2Response(BaseModel):
     sources: List[SourceDoc]
 
 
-# Stub Functions
-def semantic_search(query_text: str, top_n: int) -> List[dict]:
-    """Stub: Semantic search for relevant decisions"""
-    # TODO: Implement real semantic search
-    mock_results = [
-        {"uri": "http://example.org/decisions/123", "score": 0.82, "title": "Decision on renovation subsidy eligibility"},
-        {"uri": "http://example.org/decisions/987", "score": 0.61, "title": "Decision on energy efficiency grants"},
-        {"uri": "http://example.org/decisions/456", "score": 0.45, "title": "Decision on home improvement subsidies"},
-    ]
-    return mock_results[:top_n]
+def embed_question(question: str) -> List[float]:
+    """Call the embedding service to obtain an embedding for the question.
+
+    Args:
+        question (str): The user question to embed.
+
+    Returns:
+        List[float]: The embedding vector returned by the embedding service.
+    """
+    response = requests.post(
+        EMBEDDING_API_URL,
+        json={"input": question},
+        headers={"Content-Type": "application/json"},
+        timeout=10.0,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return data.get("embedding", [])
 
 
-def apply_relevance_threshold(docs: List[dict], min_score: float) -> List[dict]:
-    """Stub: Filter documents by relevance threshold"""
-    # TODO: Implement real threshold filtering
-    return [doc for doc in docs if doc.get("score", 0) >= min_score]
+def semantic_search(question: str, top_n: int) -> List[SourceDoc]:
+    """Perform semantic search and return normalized source documents.
+
+    Args:
+        question (str): The user question used for retrieval.
+        top_n (int): The maximum number of documents to return.
+
+    Returns:
+        List[SourceDoc]: The top retrieved documents, normalized to use `uri`
+        as the internal identifier.
+    """
+    embedding = embed_question(question)
+    embedding_string = ",".join(str(value) for value in embedding)
+    payload = {
+        "filter": {
+            ":embedding:description-vector": f"{EMBEDDING_VECTOR_PREFIX}:{embedding_string}",
+        }
+    }
+    response = requests.post(
+        SEARCH_API_URL,
+        json=payload,
+        headers={"Content-Type": "application/json"},
+        timeout=10.0,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return normalize_search_results(data.get("data", [])[:top_n])
 
 
-def generate_answer(question: str, retrieved_docs: List[dict]) -> str:
+def fetch_documents(sources: List[SourceDoc]) -> List[SourceDoc]:
+    """Fetch document metadata from Virtuoso and enrich the source documents.
+
+    Args:
+        sources (List[SourceDoc]): The normalized source documents to enrich.
+
+    Returns:
+        List[SourceDoc]: The input source documents enriched with metadata
+        retrieved from the SPARQL endpoint.
+    """
+    if not sources:
+        return []
+
+    uris = [source.uri for source in sources]
+    values = " ".join(f"<{uri}>" for uri in uris)
+    query = f"""
+    PREFIX eli: <http://data.europa.eu/eli/ontology#>
+    SELECT ?s ?title
+    WHERE {{
+      VALUES ?s {{ {values} }}
+      ?s eli:title ?title .
+    }}
+    """
+
+    response = requests.get(
+        SPARQL_ENDPOINT,
+        params={
+            "query": query,
+            "format": "application/sparql-results+json",
+        },
+        timeout=10.0,
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    title_map: dict[str, str] = {}
+    for binding in data.get("results", {}).get("bindings", []):
+        subject = binding.get("s", {}).get("value")
+        title = binding.get("title", {}).get("value")
+        if subject and title and subject not in title_map:
+            title_map[subject] = title
+
+    return [SourceDoc(uri=source.uri, title=title_map.get(source.uri)) for source in sources]
+
+
+def normalize_search_results(docs: List[dict]) -> List[SourceDoc]:
+    """Normalize retrieval API results to internal source documents.
+
+    Args:
+        docs (List[dict]): The raw documents returned by the retrieval API.
+
+    Returns:
+        List[SourceDoc]: The normalized source documents. The retrieval API
+        returns document identifiers as `id`, but within this service we
+        expose and work with them as `uri`.
+    """
+    return [SourceDoc(uri=doc["id"]) for doc in docs if doc.get("id")]
+
+def generate_answer(question: str, retrieved_docs: List[SourceDoc]) -> str:
     """Stub: Generate answer using LLM with retrieved documents"""
     # TODO: Implement real LLM generation
     doc_count = len(retrieved_docs)
@@ -57,27 +150,14 @@ def generate_answer(question: str, retrieved_docs: List[dict]) -> str:
 # Orchestration
 def process_uc2_request(request: UC2Request) -> UC2Response:
     """Main UC2 pipeline: question → search → LLM → response"""
-    # Step 1: Semantic search
-    retrieved_docs = semantic_search(request.question, request.top_n or 5)
-    
-    # Step 2: Apply relevance threshold
-    min_score = request.min_score or 0.35
-    filtered_docs = apply_relevance_threshold(retrieved_docs, min_score)
-    
-    # Step 3: Generate answer with LLM
-    answer = generate_answer(request.question, filtered_docs)
-    
-    # Step 4: Format response
-    sources = [
-        SourceDoc(uri=doc["uri"], score=doc["score"], title=doc.get("title"))
-        for doc in filtered_docs
-    ]
-    
+    sources = semantic_search(request.question, request.top_n or 3)
+    sources = fetch_documents(sources)
+    answer = generate_answer(request.question, sources)
     return UC2Response(answer=answer, sources=sources)
 
 
 # FastAPI Endpoint
 @router.post("/uc2/answer", response_model=UC2Response)
-async def uc2_answer_endpoint(request: UC2Request):
-    """UC2 endpoint: Accepts question/dialog, returns answer + source URIs"""
+def uc2_answer_endpoint(request: UC2Request):
+    """UC2 endpoint: Accepts question, returns answer + source URIs"""
     return process_uc2_request(request)
