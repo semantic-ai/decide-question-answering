@@ -16,6 +16,10 @@ EMBEDDING_API_URL = os.environ.get("EMBEDDING_API_URL")
 SPARQL_ENDPOINT = os.environ.get("SPARQL_ENDPOINT")
 GENERATION_ENDPOINT = os.environ.get("GENERATION_ENDPOINT")
 GENERATION_MODEL = os.environ.get("GENERATION_MODEL", "mistral-nemo")
+MAX_CONTENT_CHARS = int(os.environ.get("MAX_CONTENT_CHARS", "1000"))
+REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "10.0"))
+SPARQL_TIMEOUT = float(os.environ.get("SPARQL_TIMEOUT", "30.0"))
+GENERATION_TIMEOUT = float(os.environ.get("GENERATION_TIMEOUT", "300.0"))
 EMBEDDING_VECTOR_PREFIX = "5:50"
 
 
@@ -49,7 +53,7 @@ def embed_question(question: str) -> List[float]:
         EMBEDDING_API_URL,
         json={"input": question},
         headers={"Content-Type": "application/json"},
-        timeout=10.0,
+        timeout=REQUEST_TIMEOUT,
     )
     response.raise_for_status()
     data = response.json()
@@ -78,7 +82,7 @@ def semantic_search(question: str, top_n: int) -> List[SourceDoc]:
         SEARCH_API_URL,
         json=payload,
         headers={"Content-Type": "application/json"},
-        timeout=10.0,
+        timeout=REQUEST_TIMEOUT,
     )
     response.raise_for_status()
     data = response.json()
@@ -117,7 +121,7 @@ def fetch_documents(sources: List[SourceDoc]) -> List[SourceDoc]:
             "query": query,
             "format": "application/sparql-results+json",
         },
-        timeout=30.0,
+        timeout=SPARQL_TIMEOUT,
     )
     response.raise_for_status()
     data = response.json()
@@ -149,9 +153,6 @@ def normalize_search_results(docs: List[dict]) -> List[SourceDoc]:
     """
     return [SourceDoc(uri=doc["id"]) for doc in docs if doc.get("id")]
 
-MAX_CONTENT_CHARS = 1000
-
-
 def generate_answer(question: str, retrieved_docs: List[SourceDoc]) -> str:
     """Generate an answer using the LLM with retrieved documents as context."""
     doc_blocks = []
@@ -177,7 +178,7 @@ def generate_answer(question: str, retrieved_docs: List[SourceDoc]) -> str:
         f"{GENERATION_ENDPOINT}/api/generate",
         json={"model": GENERATION_MODEL, "prompt": prompt, "stream": False},
         headers={"Content-Type": "application/json"},
-        timeout=300.0,
+        timeout=GENERATION_TIMEOUT,
     )
     response.raise_for_status()
     return response.json().get("response", "")
