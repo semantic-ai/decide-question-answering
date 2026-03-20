@@ -8,17 +8,17 @@ import requests
 from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Optional, List
+from escape_helpers import sparql_escape_uri
+from helpers import query
 
 router = APIRouter()
 
 SEARCH_API_URL = os.environ.get("SEARCH_API_URL")
 EMBEDDING_API_URL = os.environ.get("EMBEDDING_API_URL")
-SPARQL_ENDPOINT = os.environ.get("SPARQL_ENDPOINT")
 GENERATION_ENDPOINT = os.environ.get("GENERATION_ENDPOINT")
 GENERATION_MODEL = os.environ.get("GENERATION_MODEL", "mistral-nemo")
 MAX_CONTENT_CHARS = int(os.environ.get("MAX_CONTENT_CHARS", "1000"))
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "10.0"))
-SPARQL_TIMEOUT = float(os.environ.get("SPARQL_TIMEOUT", "30.0"))
 GENERATION_TIMEOUT = float(os.environ.get("GENERATION_TIMEOUT", "300.0"))
 EMBEDDING_VECTOR_PREFIX = "5:50"
 
@@ -103,8 +103,8 @@ def fetch_documents(sources: List[SourceDoc]) -> List[SourceDoc]:
         return []
 
     uris = [source.uri for source in sources]
-    values = " ".join(f"<{uri}>" for uri in uris)
-    query = f"""
+    values = " ".join(sparql_escape_uri(uri) for uri in uris)
+    sparql_query = f"""
     PREFIX eli: <http://data.europa.eu/eli/ontology#>
     PREFIX epvoc: <https://data.europarl.europa.eu/def/epvoc#>
     SELECT ?s ?title ?content
@@ -115,16 +115,7 @@ def fetch_documents(sources: List[SourceDoc]) -> List[SourceDoc]:
     }}
     """
 
-    response = requests.get(
-        SPARQL_ENDPOINT,
-        params={
-            "query": query,
-            "format": "application/sparql-results+json",
-        },
-        timeout=SPARQL_TIMEOUT,
-    )
-    response.raise_for_status()
-    data = response.json()
+    data = query(sparql_query)
 
     doc_map: dict[str, dict] = {}
     for binding in data.get("results", {}).get("bindings", []):
