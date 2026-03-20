@@ -6,8 +6,8 @@ The flow is based on the following:
 - Create an HTTP service that accepts a question in JSON format.
 - Call the embedding service to obtain an embedding for the question.
 - Use the embedding to perform a semantic search and return the top retrieved decisions together with their URIs.
-- Resolve the titles of the retrieved decisions from the SPARQL endpoint.
-- Pass the question plus the retrieved decisions to an LLM to generate a response (currently a stub).
+- Resolve the titles and content of the retrieved decisions from the SPARQL endpoint.
+- Pass the question plus the retrieved documents to an LLM (Ollama) to generate a response.
 
 *Note: Relevance scoring and threshold filtering are not yet implemented as the retrieval API does not return per-document scores. The current default is to return the first 3 retrieved documents.*
 
@@ -18,7 +18,7 @@ This project currently uses direct service-to-service communication. This is a t
 ### Setup
 
 ```bash
-docker-compose up --build
+docker compose -f docker-compose.debug.yml up --build
 ```
 
 ### Verification
@@ -27,9 +27,9 @@ docker-compose up --build
 curl -X POST http://localhost:8000/uc2/answer -H "Content-Type: application/json" -d "{\"question\": \"What subsidies exist for renovating an older home?\"}"
 ```
 
-**Format notes:**
-- `question`: The current user question being asked
-- `top_n`: Optional number of retrieved documents to include, defaults to `3`
+```bash
+curl -X POST http://localhost:8000/uc2/answer -H "Content-Type: application/json" -d "{\"question\": \"Als ik iets aan mijn huis verbouw, ben ik dan zelf verantwoordelijk voor beschadigingen aan de inrichting van het openbaar domein, groenaanleg, bermen, trottoirs, boordstenen, straatkolken en de rijweg die te wijten zijn aan de bouwactiviteit ?\"}"
+```
 
 ### Expected input
 
@@ -40,22 +40,31 @@ curl -X POST http://localhost:8000/uc2/answer -H "Content-Type: application/json
 }
 ```
 
+- `question`: The current user question being asked
+- `top_n`: Optional number of retrieved documents to include, defaults to `3`
+
 ### Expected output
 
 ```json
 {
-  "answer": "STUB: Based on 3 retrieved decisions, here is a placeholder answer to: What subsidies exist for renovating an older home?",
+  "answer": "Based on the retrieved documents, ...",
   "sources": [
     {
       "uri": "https://example.org/document/1",
-      "title": "Example title"
+      "title": "Example title",
+      "content": "Document content text..."
     }
   ]
 }
 ```
 
-The response contains:
-- `answer`: The generated answer text. This is currently a stub response.
+- `answer`: The generated answer from the LLM.
 - `sources`: The retrieved source documents used for the answer.
-- `uri`: The document identifier returned by the retrieval API, exposed by this service as `uri`.
-- `title`: The document title resolved from the SPARQL endpoint when available.
+  - `uri`: The document identifier returned by the retrieval API.
+  - `title`: The document title resolved from the SPARQL endpoint.
+  - `content`: The document content resolved from the SPARQL endpoint.
+
+### Possible improvements
+
+- **Relevance scores from retrieval API**: The search API currently does not return similarity scores. If scores were available, we could filter out low-relevance documents before passing them to the LLM, reducing noise and improving answer quality.
+- **Cross-encoder reranking**: Add a reranking step between retrieval and generation. A cross-encoder is a small model that takes a question and a document together as input and outputs a relevance score. Unlike embeddings (which compress text into vectors separately and then compare), a cross-encoder reads both texts side by side, so it catches nuances that embeddings miss. The trade-off is that it's slower (it must run once per document), which is why it's used as a second stage: fast retrieval narrows down candidates, then the cross-encoder re-scores and filters them before passing to the LLM.
