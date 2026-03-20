@@ -10,4 +10,6 @@ services:
       SEARCH_API_URL: "http://search:80/expressions/large-search"
       EMBEDDING_API_URL: "http://embedding:80/embed"
       SPARQL_ENDPOINT: "http://database:8890/sparql"
+      GENERATION_ENDPOINT: "http://ollama:11434"
+      GENERATION_MODEL: "mistral-nemo"
       ALLOW_MU_AUTH_SUDO: "true"
