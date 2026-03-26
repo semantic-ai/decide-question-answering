@@ -37,6 +37,8 @@ try:
     with open(ENRICHMENT_SPARQL_TEMPLATE_FILE, encoding="utf-8") as query_file:
         ENRICHMENT_SPARQL_TEMPLATE = query_file.read()
 except OSError:
+    # TODO: Log this error instead of printing it
+    print("Warning: Could not load enrichment SPARQL template from file. Using default template.")
     ENRICHMENT_SPARQL_TEMPLATE = DEFAULT_ENRICHMENT_SPARQL_TEMPLATE
 
 
