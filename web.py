@@ -31,13 +31,12 @@ WHERE {
   OPTIONAL { ?s epvoc:expressionContent ?content . }
 }
 """
-ENRICHMENT_SPARQL_TEMPLATE = os.environ.get("ENRICHMENT_SPARQL_TEMPLATE")
-ENRICHMENT_SPARQL_TEMPLATE_FILE = os.environ.get("ENRICHMENT_SPARQL_TEMPLATE_FILE")
+ENRICHMENT_SPARQL_TEMPLATE_FILE = "/config/enrichment-query.rq"
 
-if ENRICHMENT_SPARQL_TEMPLATE_FILE:
+try:
     with open(ENRICHMENT_SPARQL_TEMPLATE_FILE, encoding="utf-8") as query_file:
         ENRICHMENT_SPARQL_TEMPLATE = query_file.read()
-else:
+except OSError:
     ENRICHMENT_SPARQL_TEMPLATE = DEFAULT_ENRICHMENT_SPARQL_TEMPLATE
 
 

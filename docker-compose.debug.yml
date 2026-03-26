@@ -5,6 +5,7 @@ services:
       - "8000:80"
     volumes:
       - .:/app
+      - ./config:/config
     environment:
       MODE: "development"
       SEARCH_API_URL: "http://search:80/expressions/large-search"
@@ -16,5 +17,4 @@ services:
       MAX_CONTENT_CHARS: "1000"
       REQUEST_TIMEOUT: "10.0"
       GENERATION_TIMEOUT: "300.0"
-      ENRICHMENT_SPARQL_TEMPLATE_FILE: "/app/config/enrichment-query.rq"
       ALLOW_MU_AUTH_SUDO: "true"
