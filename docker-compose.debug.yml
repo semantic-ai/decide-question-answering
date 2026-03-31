@@ -5,6 +5,7 @@ services:
       - "8000:80"
     volumes:
       - .:/app
+      - ./config:/config
     environment:
       MODE: "development"
       SEARCH_API_URL: "http://search:80/expressions/large-search"

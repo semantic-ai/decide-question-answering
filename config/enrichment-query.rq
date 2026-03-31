@@ -1,0 +1,8 @@
+PREFIX eli: <http://data.europa.eu/eli/ontology#>
+PREFIX epvoc: <https://data.europarl.europa.eu/def/epvoc#>
+SELECT ?s ?title ?content
+WHERE {
+  VALUES ?s { {{values}} }
+  ?s eli:title ?title .
+  OPTIONAL { ?s epvoc:expressionContent ?content . }
+}

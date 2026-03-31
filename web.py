@@ -21,6 +21,25 @@ MAX_CONTENT_CHARS = int(os.environ.get("MAX_CONTENT_CHARS", "1000"))
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "10.0"))
 GENERATION_TIMEOUT = float(os.environ.get("GENERATION_TIMEOUT", "300.0"))
 EMBEDDING_VECTOR_PREFIX = "5:50"
+DEFAULT_ENRICHMENT_SPARQL_TEMPLATE = """
+PREFIX eli: <http://data.europa.eu/eli/ontology#>
+PREFIX epvoc: <https://data.europarl.europa.eu/def/epvoc#>
+SELECT ?s ?title ?content
+WHERE {
+  VALUES ?s { {{values}} }
+  ?s eli:title ?title .
+  OPTIONAL { ?s epvoc:expressionContent ?content . }
+}
+"""
+ENRICHMENT_SPARQL_TEMPLATE_FILE = "/config/enrichment-query.rq"
+
+try:
+    with open(ENRICHMENT_SPARQL_TEMPLATE_FILE, encoding="utf-8") as query_file:
+        ENRICHMENT_SPARQL_TEMPLATE = query_file.read()
+except OSError:
+    # TODO: Log this error instead of printing it
+    print("Warning: Could not load enrichment SPARQL template from file. Using default template.")
+    ENRICHMENT_SPARQL_TEMPLATE = DEFAULT_ENRICHMENT_SPARQL_TEMPLATE
 
 
 # Request/Response Models
@@ -104,16 +123,7 @@ def fetch_documents(sources: List[SourceDoc]) -> List[SourceDoc]:
 
     uris = [source.uri for source in sources]
     values = " ".join(sparql_escape_uri(uri) for uri in uris)
-    sparql_query = f"""
-    PREFIX eli: <http://data.europa.eu/eli/ontology#>
-    PREFIX epvoc: <https://data.europarl.europa.eu/def/epvoc#>
-    SELECT ?s ?title ?content
-    WHERE {{
-      VALUES ?s {{ {values} }}
-      ?s eli:title ?title .
-      OPTIONAL {{ ?s epvoc:expressionContent ?content . }}
-    }}
-    """
+    sparql_query = ENRICHMENT_SPARQL_TEMPLATE.replace("{{values}}", values)
 
     data = query(sparql_query)
 

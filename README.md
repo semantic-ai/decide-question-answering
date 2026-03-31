@@ -21,6 +21,16 @@ This project currently uses direct service-to-service communication. This is a t
 docker compose -f docker-compose.debug.yml up --build
 ```
 
+### Enrichment query configuration
+
+The service reads its enrichment SPARQL query from:
+
+- `/config/enrichment-query.rq`
+
+The debug compose file mounts the local `config` folder to `/config`, so this file is picked up automatically during local development.
+
+For reuse in other apps, mount an app-specific folder to `/config` (for example `./config/question-answering/:/config`) and provide an `enrichment-query.rq` in that folder. This allows changing enrichment behavior (for example from "decisions" to another domain) without changing service code.
+
 ### Verification
 
 ```bash
