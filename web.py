@@ -8,12 +8,18 @@ import requests
 from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Optional, List
+from escape_helpers import sparql_escape_uri
+from helpers import query
 
 router = APIRouter()
 
 SEARCH_API_URL = os.environ.get("SEARCH_API_URL")
 EMBEDDING_API_URL = os.environ.get("EMBEDDING_API_URL")
-SPARQL_ENDPOINT = os.environ.get("SPARQL_ENDPOINT")
+GENERATION_ENDPOINT = os.environ.get("GENERATION_ENDPOINT")
+GENERATION_MODEL = os.environ.get("GENERATION_MODEL", "mistral-nemo")
+MAX_CONTENT_CHARS = int(os.environ.get("MAX_CONTENT_CHARS", "1000"))
+REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "10.0"))
+GENERATION_TIMEOUT = float(os.environ.get("GENERATION_TIMEOUT", "300.0"))
 EMBEDDING_VECTOR_PREFIX = "5:50"
 
 
@@ -26,6 +32,7 @@ class UC2Request(BaseModel):
 class SourceDoc(BaseModel):
     uri: str
     title: Optional[str] = None
+    content: Optional[str] = None
 
 
 class UC2Response(BaseModel):
@@ -46,7 +53,7 @@ def embed_question(question: str) -> List[float]:
         EMBEDDING_API_URL,
         json={"input": question},
         headers={"Content-Type": "application/json"},
-        timeout=10.0,
+        timeout=REQUEST_TIMEOUT,
     )
     response.raise_for_status()
     data = response.json()
@@ -75,7 +82,7 @@ def semantic_search(question: str, top_n: int) -> List[SourceDoc]:
         SEARCH_API_URL,
         json=payload,
         headers={"Content-Type": "application/json"},
-        timeout=10.0,
+        timeout=REQUEST_TIMEOUT,
     )
     response.raise_for_status()
     data = response.json()
@@ -96,35 +103,32 @@ def fetch_documents(sources: List[SourceDoc]) -> List[SourceDoc]:
         return []
 
     uris = [source.uri for source in sources]
-    values = " ".join(f"<{uri}>" for uri in uris)
-    query = f"""
+    values = " ".join(sparql_escape_uri(uri) for uri in uris)
+    sparql_query = f"""
     PREFIX eli: <http://data.europa.eu/eli/ontology#>
-    SELECT ?s ?title
+    PREFIX epvoc: <https://data.europarl.europa.eu/def/epvoc#>
+    SELECT ?s ?title ?content
     WHERE {{
       VALUES ?s {{ {values} }}
       ?s eli:title ?title .
+      OPTIONAL {{ ?s epvoc:expressionContent ?content . }}
     }}
     """
 
-    response = requests.get(
-        SPARQL_ENDPOINT,
-        params={
-            "query": query,
-            "format": "application/sparql-results+json",
-        },
-        timeout=10.0,
-    )
-    response.raise_for_status()
-    data = response.json()
+    data = query(sparql_query)
 
-    title_map: dict[str, str] = {}
+    doc_map: dict[str, dict] = {}
     for binding in data.get("results", {}).get("bindings", []):
         subject = binding.get("s", {}).get("value")
         title = binding.get("title", {}).get("value")
-        if subject and title and subject not in title_map:
-            title_map[subject] = title
+        content = binding.get("content", {}).get("value")
+        if subject and subject not in doc_map:
+            doc_map[subject] = {"title": title, "content": " ".join(content.split()) if content else content}
 
-    return [SourceDoc(uri=source.uri, title=title_map.get(source.uri)) for source in sources]
+    return [
+        SourceDoc(uri=source.uri, **doc_map.get(source.uri, {}))
+        for source in sources
+    ]
 
 
 def normalize_search_results(docs: List[dict]) -> List[SourceDoc]:
@@ -141,10 +145,34 @@ def normalize_search_results(docs: List[dict]) -> List[SourceDoc]:
     return [SourceDoc(uri=doc["id"]) for doc in docs if doc.get("id")]
 
 def generate_answer(question: str, retrieved_docs: List[SourceDoc]) -> str:
-    """Stub: Generate answer using LLM with retrieved documents"""
-    # TODO: Implement real LLM generation
-    doc_count = len(retrieved_docs)
-    return f"STUB: Based on {doc_count} retrieved decisions, here is a placeholder answer to: {question}"
+    """Generate an answer using the LLM with retrieved documents as context."""
+    doc_blocks = []
+    for i, doc in enumerate(retrieved_docs, start=1):
+        title = doc.title or doc.uri
+        content = (doc.content or "")[:MAX_CONTENT_CHARS]
+        doc_blocks.append(f"Document {i}\nTitle: {title}\nContent: {content}")
+
+    context = "\n\n".join(doc_blocks)
+    prompt = (
+        "You are a helpful assistant answering questions about subsidies.\n\n"
+        "Below are retrieved documents that may or may not be relevant to the question. "
+        "Use only the documents that are actually relevant to answer the question. "
+        "If none of the documents are relevant, say so.\n"
+        "Answer ONLY based on the provided documents. Do not use outside knowledge.\n\n"
+        f"{context}\n\n"
+        f"Question: {question}\n\n"
+        "IMPORTANT: You MUST answer in the exact same language as the question above. "
+        "Do NOT answer in English unless the question is in English.\n\n"
+        "Answer:"
+    )
+    response = requests.post(
+        f"{GENERATION_ENDPOINT}/api/generate",
+        json={"model": GENERATION_MODEL, "prompt": prompt, "stream": False},
+        headers={"Content-Type": "application/json"},
+        timeout=GENERATION_TIMEOUT,
+    )
+    response.raise_for_status()
+    return response.json().get("response", "")
 
 
 # Orchestration
