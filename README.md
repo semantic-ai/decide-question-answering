@@ -7,13 +7,26 @@ The flow is based on the following:
 - Call the embedding service to obtain an embedding for the question.
 - Use the embedding to perform a semantic search and return the top retrieved decisions together with their URIs.
 - Resolve the titles and content of the retrieved decisions from the SPARQL endpoint.
-- Pass the question plus the retrieved documents to an LLM (Ollama) to generate a response.
+- Pass the question plus the retrieved documents to an LLM to generate a response.
 
 *Note: Relevance scoring and threshold filtering are not yet implemented as the retrieval API does not return per-document scores. The current default is to return the first 3 retrieved documents.*
 
 ### Disclaimer
 
 This project currently uses direct service-to-service communication. This is a temporary choice while we determine how these AI services should fit within the LBLod paradigm. This approach should be treated as project-specific and should not be copied as a general pattern for other applications.
+
+### LLM provider configuration
+
+The generation step uses LangChain's [`init_chat_model`](https://python.langchain.com/docs/how_to/chat_models_universal_init/) to allow switching providers without any code changes:
+
+| Variable | Description | Default |
+|---|---|---|
+| `GENERATION_PROVIDER` | LangChain provider name (e.g. `ollama`, `mistralai`, `openai`) | `ollama` |
+| `GENERATION_MODEL` | Model name for the selected provider | `mistral-nemo` |
+| `GENERATION_ENDPOINT` | Base URL for self-hosted providers (e.g. Ollama) | — |
+| `GENERATION_API_KEY` | API key for cloud providers | — |
+
+To switch providers, change `GENERATION_PROVIDER` and `GENERATION_MODEL` and install the matching `langchain-<provider>` package in `requirements.txt`. No code changes needed.
 
 ### Setup
 
