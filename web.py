@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 from escape_helpers import sparql_escape_uri
 from helpers import query
+from langchain.chat_models import init_chat_model
 
 router = APIRouter()
 
@@ -17,9 +18,11 @@ SEARCH_API_URL = os.environ.get("SEARCH_API_URL")
 EMBEDDING_API_URL = os.environ.get("EMBEDDING_API_URL")
 GENERATION_ENDPOINT = os.environ.get("GENERATION_ENDPOINT")
 GENERATION_MODEL = os.environ.get("GENERATION_MODEL", "mistral-nemo")
+GENERATION_PROVIDER = os.environ.get("GENERATION_PROVIDER", "ollama")
+GENERATION_API_KEY = os.environ.get("GENERATION_API_KEY")
+GENERATION_TIMEOUT = float(os.environ.get("GENERATION_TIMEOUT", "300.0"))
 MAX_CONTENT_CHARS = int(os.environ.get("MAX_CONTENT_CHARS", "1000"))
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "10.0"))
-GENERATION_TIMEOUT = float(os.environ.get("GENERATION_TIMEOUT", "300.0"))
 EMBEDDING_VECTOR_PREFIX = "5:50"
 DEFAULT_ENRICHMENT_SPARQL_TEMPLATE = """
 PREFIX eli: <http://data.europa.eu/eli/ontology#>
@@ -154,6 +157,20 @@ def normalize_search_results(docs: List[dict]) -> List[SourceDoc]:
     """
     return [SourceDoc(uri=doc["id"]) for doc in docs if doc.get("id")]
 
+def _get_llm():
+    """Instantiate the LLM for the configured provider. Returns a BaseChatModel.
+    Uses LangChain's init_chat_model with a 'provider:model' string — no provider-specific
+    branching needed. Switching providers only requires changing GENERATION_PROVIDER and
+    installing the matching langchain-<provider> package.
+    """
+    return init_chat_model(
+        f"{GENERATION_PROVIDER}:{GENERATION_MODEL}",
+        base_url=GENERATION_ENDPOINT,
+        api_key=GENERATION_API_KEY,
+        timeout=GENERATION_TIMEOUT,
+    )
+
+
 def generate_answer(question: str, retrieved_docs: List[SourceDoc]) -> str:
     """Generate an answer using the LLM with retrieved documents as context."""
     doc_blocks = []
@@ -175,14 +192,8 @@ def generate_answer(question: str, retrieved_docs: List[SourceDoc]) -> str:
         "Do NOT answer in English unless the question is in English.\n\n"
         "Answer:"
     )
-    response = requests.post(
-        f"{GENERATION_ENDPOINT}/api/generate",
-        json={"model": GENERATION_MODEL, "prompt": prompt, "stream": False},
-        headers={"Content-Type": "application/json"},
-        timeout=GENERATION_TIMEOUT,
-    )
-    response.raise_for_status()
-    return response.json().get("response", "")
+    result = _get_llm().invoke(prompt)
+    return result.content
 
 
 # Orchestration
