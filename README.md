@@ -95,11 +95,26 @@ curl -X POST http://localhost:8000/uc2/answer -H "Content-Type: application/json
 | `GENERATION_TIMEOUT` | LLM request timeout in seconds | `300.0` |
 | `MAX_CONTENT_CHARS` | Max characters of document content passed to the LLM | `1000` |
 | `REQUEST_TIMEOUT` | Timeout for calls to search and embedding services (seconds) | `10.0` |
-| `MIN_SCORE` | Minimum similarity score to include a document | `0.60` |
+| `MIN_SCORE` | Minimum similarity score to include a document | `0.72` |
 | `EMBEDDING_K` | Number of nearest neighbours to request from the index | `10` |
 | `EMBEDDING_NUM_CANDIDATES` | Candidate pool size for kNN search | `400` |
 
 > **Note on `EMBEDDING_K` and `EMBEDDING_NUM_CANDIDATES`**: kNN finds the top K documents first, then applies any `owning-body` filter. If filtering by city, set `EMBEDDING_K` high enough that city documents appear in the initial pool (e.g. `200`).
+
+### Brief analysis on similarity scores
+
+Top 50 results, `k=50`, `num_candidates=400`:
+
+| Question | Score range |
+|---|---|
+| "welke smaken ijsjes zijn er?" | 0.630–0.639 |
+| "als ik 2 muntjes gooi, wat is de kans dat ik 2 keer kop krijg?" | 0.674–0.699 |
+| "qpwojednewd ewpirmfwef pwqoejk wef" | 0.688–0.703 |
+| "kan ik bij de toeristische dienst een fiets huren?" | 0.708–0.743 |
+| "wie is er verantwoordelijk voor schade aan het trottoir bij een verbouwing?" | 0.761–0.797 |
+| "waar moet ik op letten als ik een halloweentocht wil organiseren?" | 0.769–0.817 |
+
+A threshold of `0.72–0.75` filters out clearly irrelevant questions while keeping relevant ones. The current default is `0.72`.
 
 ### Possible improvements
 
