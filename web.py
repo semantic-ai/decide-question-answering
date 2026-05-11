@@ -4,6 +4,7 @@ Flow: question → embedding API → semantic search → top 3 decisions → res
 """
 
 import os
+import json
 import requests
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -23,7 +24,23 @@ GENERATION_API_KEY = os.environ.get("GENERATION_API_KEY")
 GENERATION_TIMEOUT = float(os.environ.get("GENERATION_TIMEOUT", "300.0"))
 MAX_CONTENT_CHARS = int(os.environ.get("MAX_CONTENT_CHARS", "1000"))
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "10.0"))
-EMBEDDING_VECTOR_PREFIX = "5:50"
+MIN_SCORE = float(os.environ.get("MIN_SCORE", "0.60"))
+EMBEDDING_K = int(os.environ.get("EMBEDDING_K", "10"))
+EMBEDDING_NUM_CANDIDATES = int(os.environ.get("EMBEDDING_NUM_CANDIDATES", "400"))
+
+LOCAL_AUTHORITIES_FILE = "/config/local-authorities.json"
+DEFAULT_LOCAL_AUTHORITY_URIS = {
+    "ghent": "http://data.lblod.info/id/bestuurseenheden/353234a365664e581db5c2f7cc07add2534b47b8e1ab87c821fc6e6365e6bef5",
+    "freiburg": None,
+    "bamberg": None,
+}
+
+try:
+    with open(LOCAL_AUTHORITIES_FILE, encoding="utf-8") as f:
+        LOCAL_AUTHORITY_URIS = json.load(f)
+except OSError:
+    print("Warning: Could not load local authorities from file. Using default mapping.")
+    LOCAL_AUTHORITY_URIS = DEFAULT_LOCAL_AUTHORITY_URIS
 DEFAULT_ENRICHMENT_SPARQL_TEMPLATE = """
 PREFIX eli: <http://data.europa.eu/eli/ontology#>
 PREFIX epvoc: <https://data.europarl.europa.eu/def/epvoc#>
@@ -48,13 +65,15 @@ except OSError:
 # Request/Response Models
 class UC2Request(BaseModel):
     question: str  # Current user question
-    top_n: Optional[int] = 3
+    top_n: Optional[int] = 5
+    localAuthority: Optional[str] = None  # Name of the bestuurseenheid to filter by, will be mapped to an URI
 
 
 class SourceDoc(BaseModel):
     uri: str
     title: Optional[str] = None
     content: Optional[str] = None
+    score: Optional[float] = None
 
 
 class UC2Response(BaseModel):
@@ -82,7 +101,7 @@ def embed_question(question: str) -> List[float]:
     return data.get("embedding", [])
 
 
-def semantic_search(question: str, top_n: int) -> List[SourceDoc]:
+def semantic_search(question: str, top_n: int, local_authority: Optional[str] = None) -> List[SourceDoc]:
     """Perform semantic search and return normalized source documents.
 
     Args:
@@ -95,11 +114,12 @@ def semantic_search(question: str, top_n: int) -> List[SourceDoc]:
     """
     embedding = embed_question(question)
     embedding_string = ",".join(str(value) for value in embedding)
-    payload = {
-        "filter": {
-            ":embedding:description-vector": f"{EMBEDDING_VECTOR_PREFIX}:{embedding_string}",
-        }
+    filter_params = {
+        ":embedding:description-vector": f"{EMBEDDING_K}:{EMBEDDING_NUM_CANDIDATES}:{embedding_string}",
     }
+    if local_authority:
+        filter_params["owning-body"] = local_authority
+    payload = {"filter": filter_params}
     response = requests.post(
         SEARCH_API_URL,
         json=payload,
@@ -108,7 +128,9 @@ def semantic_search(question: str, top_n: int) -> List[SourceDoc]:
     )
     response.raise_for_status()
     data = response.json()
-    return normalize_search_results(data.get("data", [])[:top_n])
+    results = normalize_search_results(data.get("data", []))
+    results = [doc for doc in results if doc.score is None or doc.score >= MIN_SCORE]
+    return results[:top_n]
 
 
 def fetch_documents(sources: List[SourceDoc]) -> List[SourceDoc]:
@@ -139,7 +161,7 @@ def fetch_documents(sources: List[SourceDoc]) -> List[SourceDoc]:
             doc_map[subject] = {"title": title, "content": " ".join(content.split()) if content else content}
 
     return [
-        SourceDoc(uri=source.uri, **doc_map.get(source.uri, {}))
+        SourceDoc(uri=source.uri, score=source.score, **doc_map.get(source.uri, {}))
         for source in sources
     ]
 
@@ -155,7 +177,10 @@ def normalize_search_results(docs: List[dict]) -> List[SourceDoc]:
         returns document identifiers as `id`, but within this service we
         expose and work with them as `uri`.
     """
-    return [SourceDoc(uri=doc["id"]) for doc in docs if doc.get("id")]
+    return [
+        SourceDoc(uri=doc["id"], score=doc.get("score"))
+        for doc in docs if doc.get("id")
+    ]
 
 def _get_llm():
     """Instantiate the LLM for the configured provider. Returns a BaseChatModel.
@@ -181,7 +206,7 @@ def generate_answer(question: str, retrieved_docs: List[SourceDoc]) -> str:
 
     context = "\n\n".join(doc_blocks)
     prompt = (
-        "You are a helpful assistant answering questions about subsidies.\n\n"
+        "You are a helpful assistant answering questions about city council decisions.\n\n"
         "Below are retrieved documents that may or may not be relevant to the question. "
         "Use only the documents that are actually relevant to answer the question. "
         "If none of the documents are relevant, say so.\n"
@@ -199,7 +224,10 @@ def generate_answer(question: str, retrieved_docs: List[SourceDoc]) -> str:
 # Orchestration
 def process_uc2_request(request: UC2Request) -> UC2Response:
     """Main UC2 pipeline: question → search → LLM → response"""
-    sources = semantic_search(request.question, request.top_n or 3)
+    authority_uri = LOCAL_AUTHORITY_URIS.get((request.localAuthority or "").lower())
+    sources = semantic_search(request.question, request.top_n or 5, authority_uri)
+    if not sources:
+        return UC2Response(answer="No relevant documents were found to answer this question.", sources=[])
     sources = fetch_documents(sources)
     answer = generate_answer(request.question, sources)
     return UC2Response(answer=answer, sources=sources)

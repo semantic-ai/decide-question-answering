@@ -9,8 +9,6 @@ The flow is based on the following:
 - Resolve the titles and content of the retrieved decisions from the SPARQL endpoint.
 - Pass the question plus the retrieved documents to an LLM to generate a response.
 
-*Note: Relevance scoring and threshold filtering are not yet implemented as the retrieval API does not return per-document scores. The current default is to return the first 3 retrieved documents.*
-
 ### Disclaimer
 
 This project currently uses direct service-to-service communication. This is a temporary choice while we determine how these AI services should fit within the LBLod paradigm. This approach should be treated as project-specific and should not be copied as a general pattern for other applications.
@@ -34,15 +32,23 @@ To switch providers, change `GENERATION_PROVIDER` and `GENERATION_MODEL` and ins
 docker compose -f docker-compose.debug.yml up --build
 ```
 
-### Enrichment query configuration
+### Config files
 
-The service reads its enrichment SPARQL query from:
+Both files are read from `/config` at startup (mounted via `docker-compose.debug.yml`):
 
-- `/config/enrichment-query.rq`
+| File | Purpose |
+|---|---|
+| `enrichment-query.rq` | SPARQL query to fetch title and content for retrieved URIs |
+| `local-authorities.json` | Maps city names (lowercase) to their bestuurseenheid URIs for filtering |
 
-The debug compose file mounts the local `config` folder to `/config`, so this file is picked up automatically during local development.
-
-For reuse in other apps, mount an app-specific folder to `/config` (for example `./config/question-answering/:/config`) and provide an `enrichment-query.rq` in that folder. This allows changing enrichment behavior (for example from "decisions" to another domain) without changing service code.
+Example `local-authorities.json`:
+```json
+{
+  "ghent": "http://data.lblod.info/id/bestuurseenheden/...",
+  "freiburg": null
+}
+```
+Set a city to `null` to disable filtering for it (returns all results unfiltered).
 
 ### Verification
 
@@ -59,12 +65,14 @@ curl -X POST http://localhost:8000/uc2/answer -H "Content-Type: application/json
 ```json
 {
   "question": "What subsidies exist for renovating an older home?",
-  "top_n": 3
+  "top_n": 5,
+  "localAuthority": "ghent"
 }
 ```
 
-- `question`: The current user question being asked
-- `top_n`: Optional number of retrieved documents to include, defaults to `3`
+- `question`: The user question
+- `top_n`: Max documents to include in the answer (default: `5`)
+- `localAuthority`: Optional city name to filter results (e.g. `"ghent"`). Must match a key in `local-authorities.json`.
 
 ### Expected output
 
@@ -86,8 +94,23 @@ curl -X POST http://localhost:8000/uc2/answer -H "Content-Type: application/json
   - `uri`: The document identifier returned by the retrieval API.
   - `title`: The document title resolved from the SPARQL endpoint.
   - `content`: The document content resolved from the SPARQL endpoint.
+  - `score`: The similarity score from the retrieval API (may be `null`).
+
+### Other environment variables
+
+| Variable | Description | Default |
+|---|---|---|
+| `SEARCH_API_URL` | mu-search large-search endpoint | — |
+| `EMBEDDING_API_URL` | Embedding service endpoint | — |
+| `GENERATION_TIMEOUT` | LLM request timeout in seconds | `300.0` |
+| `MAX_CONTENT_CHARS` | Max characters of document content passed to the LLM | `1000` |
+| `REQUEST_TIMEOUT` | Timeout for calls to search and embedding services (seconds) | `10.0` |
+| `MIN_SCORE` | Minimum similarity score to include a document | `0.60` |
+| `EMBEDDING_K` | Number of nearest neighbours to request from the index | `10` |
+| `EMBEDDING_NUM_CANDIDATES` | Candidate pool size for kNN search | `400` |
+
+> **Note on `EMBEDDING_K` and `EMBEDDING_NUM_CANDIDATES`**: kNN finds the top K documents first, then applies any `owning-body` filter. If filtering by city, set `EMBEDDING_K` high enough that city documents appear in the initial pool (e.g. `200`).
 
 ### Possible improvements
 
-- **Relevance scores from retrieval API**: The search API currently does not return similarity scores. If scores were available, we could filter out low-relevance documents before passing them to the LLM, reducing noise and improving answer quality.
-- **Cross-encoder reranking**: Add a reranking step between retrieval and generation. A cross-encoder is a small model that takes a question and a document together as input and outputs a relevance score. Unlike embeddings (which compress text into vectors separately and then compare), a cross-encoder reads both texts side by side, so it catches nuances that embeddings miss. The trade-off is that it's slower (it must run once per document), which is why it's used as a second stage: fast retrieval narrows down candidates, then the cross-encoder re-scores and filters them before passing to the LLM.
+- **Cross-encoder reranking**: Add a reranking step between retrieval and generation. A cross-encoder reads the question and each document side by side and outputs a relevance score — more accurate than embeddings but slower. Use it as a second stage to re-score and filter after fast retrieval.
