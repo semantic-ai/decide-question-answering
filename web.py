@@ -23,7 +23,7 @@ GENERATION_API_KEY = os.environ.get("GENERATION_API_KEY")
 GENERATION_TIMEOUT = float(os.environ.get("GENERATION_TIMEOUT", "300.0"))
 MAX_CONTENT_CHARS = int(os.environ.get("MAX_CONTENT_CHARS", "1000"))
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "10.0"))
-MIN_SCORE = float(os.environ.get("MIN_SCORE", "0.60"))
+MIN_SCORE = float(os.environ.get("MIN_SCORE", "0.72"))
 EMBEDDING_K = int(os.environ.get("EMBEDDING_K", "10"))
 EMBEDDING_NUM_CANDIDATES = int(os.environ.get("EMBEDDING_NUM_CANDIDATES", "400"))
 
