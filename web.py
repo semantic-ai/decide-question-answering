@@ -1,6 +1,6 @@
 """
 UC2 Subsidies RAG System
-Flow: question → embedding API → semantic search → top 3 decisions → response
+Flow: question → embedding API → semantic search → top N decisions → response
 """
 
 import os
