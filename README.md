@@ -34,21 +34,11 @@ docker compose -f docker-compose.debug.yml up --build
 
 ### Config files
 
-Both files are read from `/config` at startup (mounted via `docker-compose.debug.yml`):
+The following file is read from `/config` at startup (mounted via `docker-compose.debug.yml`):
 
 | File | Purpose |
 |---|---|
 | `enrichment-query.rq` | SPARQL query to fetch title and content for retrieved URIs |
-| `local-authorities.json` | Maps city names (lowercase) to their bestuurseenheid URIs for filtering |
-
-Example `local-authorities.json`:
-```json
-{
-  "ghent": "http://data.lblod.info/id/bestuurseenheden/...",
-  "freiburg": null
-}
-```
-Set a city to `null` to disable filtering for it (returns all results unfiltered).
 
 ### Verification
 
@@ -72,7 +62,7 @@ curl -X POST http://localhost:8000/uc2/answer -H "Content-Type: application/json
 
 - `question`: The user question
 - `top_n`: Max documents to include in the answer (default: `5`)
-- `localAuthority`: Optional city name to filter results (e.g. `"ghent"`). Must match a key in `local-authorities.json`.
+- `localAuthority`: Optional city name to filter results (e.g. `"Gent"`). Looked up dynamically via `skos:prefLabel` on `besluit:Bestuurseenheid`
 
 ### Expected output
 

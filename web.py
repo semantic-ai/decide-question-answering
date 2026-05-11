@@ -4,12 +4,11 @@ Flow: question → embedding API → semantic search → top N decisions → res
 """
 
 import os
-import json
 import requests
 from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Optional, List
-from escape_helpers import sparql_escape_uri
+from escape_helpers import sparql_escape_uri, sparql_escape_string
 from helpers import query
 from langchain.chat_models import init_chat_model
 
@@ -28,19 +27,8 @@ MIN_SCORE = float(os.environ.get("MIN_SCORE", "0.60"))
 EMBEDDING_K = int(os.environ.get("EMBEDDING_K", "10"))
 EMBEDDING_NUM_CANDIDATES = int(os.environ.get("EMBEDDING_NUM_CANDIDATES", "400"))
 
-LOCAL_AUTHORITIES_FILE = "/config/local-authorities.json"
-DEFAULT_LOCAL_AUTHORITY_URIS = {
-    "ghent": "http://data.lblod.info/id/bestuurseenheden/353234a365664e581db5c2f7cc07add2534b47b8e1ab87c821fc6e6365e6bef5",
-    "freiburg": None,
-    "bamberg": None,
-}
+GEMEENTE_CLASSIFICATION_URI = "http://data.vlaanderen.be/id/concept/BestuurseenheidClassificatieCode/5ab0e9b8a3b2ca7c5e000001"
 
-try:
-    with open(LOCAL_AUTHORITIES_FILE, encoding="utf-8") as f:
-        LOCAL_AUTHORITY_URIS = json.load(f)
-except OSError:
-    print("Warning: Could not load local authorities from file. Using default mapping.")
-    LOCAL_AUTHORITY_URIS = DEFAULT_LOCAL_AUTHORITY_URIS
 DEFAULT_ENRICHMENT_SPARQL_TEMPLATE = """
 PREFIX eli: <http://data.europa.eu/eli/ontology#>
 PREFIX epvoc: <https://data.europarl.europa.eu/def/epvoc#>
@@ -166,6 +154,24 @@ def fetch_documents(sources: List[SourceDoc]) -> List[SourceDoc]:
     ]
 
 
+def lookup_authority_uri(city_name: str) -> Optional[str]:
+    """Look up the gemeente bestuurseenheid URI by skos:prefLabel."""
+    sparql_query = f"""
+PREFIX besluit: <http://data.vlaanderen.be/ns/besluit#>
+PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+SELECT ?uri WHERE {{
+  ?uri a besluit:Bestuurseenheid ;
+       skos:prefLabel ?label ;
+       besluit:classificatie {sparql_escape_uri(GEMEENTE_CLASSIFICATION_URI)} .
+  FILTER(LCASE(STR(?label)) = {sparql_escape_string(city_name.lower())})
+}}
+LIMIT 1
+"""
+    data = query(sparql_query)
+    bindings = data.get("results", {}).get("bindings", [])
+    return bindings[0].get("uri", {}).get("value") if bindings else None
+
+
 def normalize_search_results(docs: List[dict]) -> List[SourceDoc]:
     """Normalize retrieval API results to internal source documents.
 
@@ -224,7 +230,7 @@ def generate_answer(question: str, retrieved_docs: List[SourceDoc]) -> str:
 # Orchestration
 def process_uc2_request(request: UC2Request) -> UC2Response:
     """Main UC2 pipeline: question → search → LLM → response"""
-    authority_uri = LOCAL_AUTHORITY_URIS.get((request.localAuthority or "").lower())
+    authority_uri = lookup_authority_uri(request.localAuthority) if request.localAuthority else None
     sources = semantic_search(request.question, request.top_n or 5, authority_uri)
     if not sources:
         return UC2Response(answer="No relevant documents were found to answer this question.", sources=[])
