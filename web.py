@@ -208,7 +208,7 @@ def process_request(request: AnswerRequest) -> AnswerResponse:
 
 
 # FastAPI Endpoint
-@router.get("/docs", include_in_schema=False)
+@router.get("/question-answering/documentation", include_in_schema=False)
 def custom_swagger_ui() -> HTMLResponse:
     return get_swagger_ui_html(
         openapi_url="/question-answering/openapi.json",
