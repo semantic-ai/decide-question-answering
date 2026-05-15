@@ -6,7 +6,6 @@ services:
       - logging=true
     command: >
       uv run python -Xfrozen_modules=off -m debugpy 
-      --wait-for-client
       --listen 0.0.0.0:5678
       -m uvicorn web:app --host 0.0.0.0 --port 80 --proxy-headers --timeout-keep-alive 300 --workers 1 --reload --reload-dir /app
     ports:
