@@ -1,6 +1,6 @@
-## UC2 Subsidies RAG System
+## Local decision question answering RAG System
 
-This service implements the HTTP flow for a subsidies RAG (Retrieval-Augmented Generation) system.
+This service implements the HTTP flow for a local decision question answering RAG (Retrieval-Augmented Generation) system.
 
 The flow is based on the following:
 - Create an HTTP service that accepts a question in JSON format.
@@ -43,11 +43,11 @@ The following file is read from `/config` at startup (mounted via `docker-compos
 ### Verification
 
 ```bash
-curl -X POST http://localhost:8000/uc2/answer -H "Content-Type: application/json" -d "{\"question\": \"What subsidies exist for renovating an older home?\"}"
+curl -X POST http://localhost:8000/question-answering/answer -H "Content-Type: application/json" -d "{\"question\": \"What subsidies exist for renovating an older home?\"}"
 ```
 
 ```bash
-curl -X POST http://localhost:8000/uc2/answer -H "Content-Type: application/json" -d "{\"question\": \"Als ik iets aan mijn huis verbouw, ben ik dan zelf verantwoordelijk voor beschadigingen aan de inrichting van het openbaar domein, groenaanleg, bermen, trottoirs, boordstenen, straatkolken en de rijweg die te wijten zijn aan de bouwactiviteit ?\"}"
+curl -X POST http://localhost:8000/question-answering/answer -H "Content-Type: application/json" -d "{\"question\": \"Als ik iets aan mijn huis verbouw, ben ik dan zelf verantwoordelijk voor beschadigingen aan de inrichting van het openbaar domein, groenaanleg, bermen, trottoirs, boordstenen, straatkolken en de rijweg die te wijten zijn aan de bouwactiviteit ?\"}"
 ```
 
 ### Expected input
@@ -56,13 +56,13 @@ curl -X POST http://localhost:8000/uc2/answer -H "Content-Type: application/json
 {
   "question": "What subsidies exist for renovating an older home?",
   "top_n": 5,
-  "localAuthority": "ghent"
+  "localAuthority": "http://data.lblod.info/id/bestuurseenheden/6358381406fcce10a7eba9b6a1257626"
 }
 ```
 
 - `question`: The user question
 - `top_n`: Max documents to include in the answer (default: `5`)
-- `localAuthority`: Optional city name to filter results (e.g. `"Gent"`). Looked up dynamically via `skos:prefLabel` on `besluit:Bestuurseenheid`
+- `localAuthority`: Optional URI of the local authority to filter results by
 
 ### Expected output
 
@@ -73,7 +73,8 @@ curl -X POST http://localhost:8000/uc2/answer -H "Content-Type: application/json
     {
       "uri": "https://example.org/document/1",
       "title": "Example title",
-      "content": "Document content text..."
+      "content": "Document content text...",
+      "score": 0.812
     }
   ]
 }
