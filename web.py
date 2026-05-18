@@ -10,7 +10,7 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List
-from escape_helpers import sparql_escape_uri, sparql_escape_string
+from escape_helpers import sparql_escape_uri
 from helpers import query
 from langchain.chat_models import init_chat_model
 
@@ -28,8 +28,6 @@ REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "10.0"))
 MIN_SCORE = float(os.environ.get("MIN_SCORE", "0.72"))
 EMBEDDING_K = int(os.environ.get("EMBEDDING_K", "10"))
 EMBEDDING_NUM_CANDIDATES = int(os.environ.get("EMBEDDING_NUM_CANDIDATES", "400"))
-
-GEMEENTE_CLASSIFICATION_URI = "http://data.vlaanderen.be/id/concept/BestuurseenheidClassificatieCode/5ab0e9b8a3b2ca7c5e000001"
 
 DEFAULT_ENRICHMENT_SPARQL_TEMPLATE = """
 PREFIX eli: <http://data.europa.eu/eli/ontology#>
@@ -56,7 +54,7 @@ except OSError:
 class AnswerRequest(BaseModel):
     question: str = Field(..., description="The question to answer.", examples=["Welke subsidies zijn er voor dakisolatie?"])
     top_n: Optional[int] = Field(5, description="Number of source documents to retrieve.", ge=1, le=20)
-    localAuthority: Optional[str] = Field(None, description="Name of the local authority to filter by.")
+    localAuthority: Optional[str] = Field(None, description="URI of the local authority to filter by.")
 
 
 class SourceDoc(BaseModel):
@@ -97,6 +95,7 @@ def semantic_search(question: str, top_n: int, local_authority: Optional[str] = 
     Args:
         question (str): The user question used for retrieval.
         top_n (int): The maximum number of documents to return.
+        local_authority (str, optional): URI of the local authority to filter results by.
 
     Returns:
         List[SourceDoc]: The top retrieved documents, normalized to use `uri`
@@ -156,23 +155,6 @@ def fetch_documents(sources: List[SourceDoc]) -> List[SourceDoc]:
     ]
 
 
-def lookup_authority_uri(city_name: str) -> Optional[str]:
-    """Look up the gemeente bestuurseenheid URI by skos:prefLabel."""
-    sparql_query = f"""
-PREFIX besluit: <http://data.vlaanderen.be/ns/besluit#>
-PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
-SELECT ?uri WHERE {{
-  ?uri a besluit:Bestuurseenheid ;
-       skos:prefLabel ?label ;
-       besluit:classificatie {sparql_escape_uri(GEMEENTE_CLASSIFICATION_URI)} .
-  FILTER(LCASE(STR(?label)) = {sparql_escape_string(city_name.lower())})
-}}
-LIMIT 1
-"""
-    data = query(sparql_query)
-    bindings = data.get("results", {}).get("bindings", [])
-    return bindings[0].get("uri", {}).get("value") if bindings else None
-
 
 def normalize_search_results(docs: List[dict]) -> List[SourceDoc]:
     """Normalize retrieval API results to internal source documents.
@@ -231,9 +213,8 @@ def generate_answer(question: str, retrieved_docs: List[SourceDoc]) -> str:
 
 # Orchestration
 def process_request(request: AnswerRequest) -> AnswerResponse:
-    """Main UC2 pipeline: question → search → LLM → response"""
-    authority_uri = lookup_authority_uri(request.localAuthority) if request.localAuthority else None
-    sources = semantic_search(request.question, request.top_n or 5, authority_uri)
+    """Main pipeline: question → search → LLM → response"""
+    sources = semantic_search(request.question, request.top_n or 5, request.localAuthority)
     if not sources:
         return AnswerResponse(answer="No relevant documents were found to answer this question.", sources=[])
     sources = fetch_documents(sources)
