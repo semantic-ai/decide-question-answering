@@ -1,12 +1,14 @@
 """
-UC2 Subsidies RAG System
+Question Answering RAG System
 Flow: question → embedding API → semantic search → top N decisions → response
 """
 
 import os
 import requests
 from fastapi import APIRouter
-from pydantic import BaseModel
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
 from typing import Optional, List
 from escape_helpers import sparql_escape_uri, sparql_escape_string
 from helpers import query
@@ -51,22 +53,22 @@ except OSError:
 
 
 # Request/Response Models
-class UC2Request(BaseModel):
-    question: str  # Current user question
-    top_n: Optional[int] = 5
-    localAuthority: Optional[str] = None  # Name of the bestuurseenheid to filter by, will be mapped to an URI
+class AnswerRequest(BaseModel):
+    question: str = Field(..., description="The question to answer.", examples=["Welke subsidies zijn er voor dakisolatie?"])
+    top_n: Optional[int] = Field(5, description="Number of source documents to retrieve.", ge=1, le=20)
+    localAuthority: Optional[str] = Field(None, description="Name of the local authority to filter by.")
 
 
 class SourceDoc(BaseModel):
-    uri: str
-    title: Optional[str] = None
-    content: Optional[str] = None
-    score: Optional[float] = None
+    uri: str = Field(..., description="URI of the source document.")
+    title: Optional[str] = Field(None, description="Document title.")
+    content: Optional[str] = Field(None, description="Relevant excerpt used to generate the answer.")
+    score: Optional[float] = Field(None, description="Similarity score from semantic search.")
 
 
-class UC2Response(BaseModel):
-    answer: str
-    sources: List[SourceDoc]
+class AnswerResponse(BaseModel):
+    answer: str = Field(..., description="Answer generated from the retrieved documents, in the same language as the question.")
+    sources: List[SourceDoc] = Field(..., description="Documents used to generate the answer.")
 
 
 def embed_question(question: str) -> List[float]:
@@ -228,19 +230,31 @@ def generate_answer(question: str, retrieved_docs: List[SourceDoc]) -> str:
 
 
 # Orchestration
-def process_uc2_request(request: UC2Request) -> UC2Response:
+def process_request(request: AnswerRequest) -> AnswerResponse:
     """Main UC2 pipeline: question → search → LLM → response"""
     authority_uri = lookup_authority_uri(request.localAuthority) if request.localAuthority else None
     sources = semantic_search(request.question, request.top_n or 5, authority_uri)
     if not sources:
-        return UC2Response(answer="No relevant documents were found to answer this question.", sources=[])
+        return AnswerResponse(answer="No relevant documents were found to answer this question.", sources=[])
     sources = fetch_documents(sources)
     answer = generate_answer(request.question, sources)
-    return UC2Response(answer=answer, sources=sources)
+    return AnswerResponse(answer=answer, sources=sources)
 
 
 # FastAPI Endpoint
-@router.post("/uc2/answer", response_model=UC2Response)
-def uc2_answer_endpoint(request: UC2Request):
-    """UC2 endpoint: Accepts question, returns answer + source URIs"""
-    return process_uc2_request(request)
+@router.get("/question-answering/documentation", include_in_schema=False)
+def custom_swagger_ui() -> HTMLResponse:
+    return get_swagger_ui_html(
+        openapi_url="/question-answering/openapi.json",
+        title="Question Answering API",
+    )
+
+
+@router.post(
+    "/question-answering/answer",
+    response_model=AnswerResponse,
+    summary="Answer a question",
+    description="Finds relevant local authority decisions using semantic search and returns an LLM-generated answer with source documents.",
+)
+def answer_endpoint(request: AnswerRequest):
+    return process_request(request)

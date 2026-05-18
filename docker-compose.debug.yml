@@ -1,14 +1,23 @@
 services:
-  api:
+  question-answering:
     build: .
+    restart: no
+    labels:
+      - logging=true
+    command: >
+      uv run python -Xfrozen_modules=off -m debugpy 
+      --listen 0.0.0.0:5678
+      -m uvicorn web:app --host 0.0.0.0 --port 80 --proxy-headers --timeout-keep-alive 300 --workers 1 --reload --reload-dir /app
     ports:
       - "8000:80"
+      - "5678:5678"
     volumes:
       - .:/app
       - ./config:/config
     environment:
       MODE: "development"
       SEARCH_API_URL: "http://search:80/expressions/large-search"
+      LOG_SPARQL_ALL: "false"
       EMBEDDING_API_URL: "http://embedding:80/embed"
       MU_SPARQL_ENDPOINT: "http://database:8890/sparql"
       MU_SPARQL_TIMEOUT: "30"
@@ -19,3 +28,10 @@ services:
       MAX_CONTENT_CHARS: "1000"
       REQUEST_TIMEOUT: "10.0"
       ALLOW_MU_AUTH_SUDO: "true"
+    networks:
+      - debug
+      - default
+
+networks:
+  debug:
+    external: true
