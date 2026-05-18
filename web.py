@@ -169,7 +169,7 @@ def normalize_search_results(docs: List[dict]) -> List[SourceDoc]:
     """
     return [
         SourceDoc(uri=doc["id"], score=doc.get("score"))
-        for doc in docs if doc.get("id")
+        for doc in docs if doc.get("attributes").get("uri")
     ]
 
 def _get_llm():
