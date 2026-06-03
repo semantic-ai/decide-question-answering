@@ -23,11 +23,12 @@ GENERATION_MODEL = os.environ.get("GENERATION_MODEL", "mistral-nemo")
 GENERATION_PROVIDER = os.environ.get("GENERATION_PROVIDER", "ollama")
 GENERATION_API_KEY = os.environ.get("GENERATION_API_KEY")
 GENERATION_TIMEOUT = float(os.environ.get("GENERATION_TIMEOUT", "300.0"))
-MAX_CONTENT_CHARS = int(os.environ.get("MAX_CONTENT_CHARS", "1000"))
+MAX_CONTENT_CHARS = int(os.environ.get("MAX_CONTENT_CHARS", "50000"))
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "10.0"))
 MIN_SCORE = float(os.environ.get("MIN_SCORE", "0.72"))
-EMBEDDING_K = int(os.environ.get("EMBEDDING_K", "10"))
-EMBEDDING_NUM_CANDIDATES = int(os.environ.get("EMBEDDING_NUM_CANDIDATES", "400"))
+EMBEDDING_K = int(os.environ.get("EMBEDDING_K", "10000"))
+EMBEDDING_NUM_CANDIDATES = int(os.environ.get("EMBEDDING_NUM_CANDIDATES", "10000"))
+TITLE_FALLBACK_CHARS = int(os.environ.get("TITLE_FALLBACK_CHARS", "80"))
 
 DEFAULT_ENRICHMENT_SPARQL_TEMPLATE = """
 PREFIX eli: <http://data.europa.eu/eli/ontology#>
@@ -122,6 +123,23 @@ def semantic_search(question: str, top_n: int, local_authority: Optional[str] = 
     return results[:top_n]
 
 
+def _derive_title(title: Optional[str], content: Optional[str]) -> Optional[str]:
+    """Return a display title for a source document.
+
+    Prefers an actual title (direct ``eli:title`` or one supplied via an
+    annotation). When none is available — e.g. Bamberg expressions without a
+    title annotation, or one with an empty value — it falls back to the first
+    ``TITLE_FALLBACK_CHARS`` characters of the content, with markdown markers
+    and redundant whitespace stripped. Returns ``None`` if neither exists.
+    """
+    if title and title.strip():
+        return title.strip()
+    if content and content.strip():
+        snippet = " ".join(content.split()).lstrip("*# ").strip()
+        return snippet[:TITLE_FALLBACK_CHARS] or None
+    return None
+
+
 def fetch_documents(sources: List[SourceDoc]) -> List[SourceDoc]:
     """Fetch document metadata from Virtuoso and enrich the source documents.
 
@@ -144,10 +162,19 @@ def fetch_documents(sources: List[SourceDoc]) -> List[SourceDoc]:
     doc_map: dict[str, dict] = {}
     for binding in data.get("results", {}).get("bindings", []):
         subject = binding.get("s", {}).get("value")
+        if not subject:
+            continue
         title = binding.get("title", {}).get("value")
         content = binding.get("content", {}).get("value")
-        if subject and subject not in doc_map:
-            doc_map[subject] = {"title": title, "content": " ".join(content.split()) if content else content}
+        entry = doc_map.setdefault(subject, {"title": None, "content": None})
+        if content and not entry["content"]:
+            entry["content"] = " ".join(content.split())
+        if title and title.strip() and not (entry["title"] and entry["title"].strip()):
+            entry["title"] = title.strip()
+
+    # Fall back to a content snippet when no usable title was found.
+    for entry in doc_map.values():
+        entry["title"] = _derive_title(entry["title"], entry["content"])
 
     return [
         SourceDoc(uri=source.uri, score=source.score, **doc_map.get(source.uri, {}))
@@ -168,8 +195,8 @@ def normalize_search_results(docs: List[dict]) -> List[SourceDoc]:
         expose and work with them as `uri`.
     """
     return [
-        SourceDoc(uri=doc["id"], score=doc.get("score"))
-        for doc in docs if doc.get("attributes").get("uri")
+        SourceDoc(uri=doc["attributes"]["uri"], score=doc.get("score"))
+        for doc in docs if doc.get("attributes", {}).get("uri")
     ]
 
 def _get_llm():

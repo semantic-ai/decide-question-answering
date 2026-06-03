@@ -25,7 +25,7 @@ services:
       GENERATION_ENDPOINT: "http://ollama:11434"
       GENERATION_MODEL: "mistral-nemo"
       GENERATION_TIMEOUT: "300.0"
-      MAX_CONTENT_CHARS: "1000"
+      MAX_CONTENT_CHARS: "50000"
       REQUEST_TIMEOUT: "10.0"
       ALLOW_MU_AUTH_SUDO: "true"
     networks:
