@@ -26,6 +26,24 @@ The generation step uses LangChain's [`init_chat_model`](https://python.langchai
 
 To switch providers, change `GENERATION_PROVIDER` and `GENERATION_MODEL` and install the matching `langchain-<provider>` package in `requirements.txt`. No code changes needed.
 
+**Example — self-hosted Ollama (default):**
+
+```yaml
+GENERATION_PROVIDER: "ollama"
+GENERATION_ENDPOINT: "http://ollama:11434"
+GENERATION_MODEL: "mistral-nemo"
+```
+
+**Example — Mistral cloud:**
+
+```yaml
+GENERATION_PROVIDER: "mistralai"
+GENERATION_MODEL: "mistral-large"
+GENERATION_API_KEY: "<your-mistral-api-key>"
+```
+
+Cloud providers use `GENERATION_API_KEY` instead of `GENERATION_ENDPOINT`, and require the matching package (e.g. `langchain-mistralai`) in `requirements.txt`.
+
 ### Setup
 
 ```bash
