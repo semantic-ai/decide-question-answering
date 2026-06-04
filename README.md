@@ -5,7 +5,7 @@ This service implements the HTTP flow for a local decision question answering RA
 The flow is based on the following:
 - Create an HTTP service that accepts a question in JSON format.
 - Call the embedding service to obtain an embedding for the question.
-- Use the embedding to perform a semantic search and return the top retrieved decisions together with their URIs.
+- Use the embedding to perform a pre-filtered kNN search directly against Elasticsearch (the `owning-body`/city filter is applied *inside* the kNN) and return the top retrieved decisions together with their URIs.
 - Resolve the titles and content of the retrieved decisions from the SPARQL endpoint.
 - Pass the question plus the retrieved documents to an LLM to generate a response.
 
@@ -109,16 +109,16 @@ curl -X POST http://localhost:8000/question-answering/answer -H "Content-Type: a
 
 | Variable | Description | Default |
 |---|---|---|
-| `SEARCH_API_URL` | mu-search large-search endpoint | — |
+| `ELASTICSEARCH_URL` | Elasticsearch base URL for the direct pre-filtered kNN search | `http://elasticsearch:9200` |
 | `EMBEDDING_API_URL` | Embedding service endpoint | — |
 | `GENERATION_TIMEOUT` | LLM request timeout in seconds | `300.0` |
 | `MAX_CONTENT_CHARS` | Max characters of document content passed to the LLM | `1000` |
 | `REQUEST_TIMEOUT` | Timeout for calls to search and embedding services (seconds) | `10.0` |
 | `MIN_SCORE` | Minimum similarity score to include a document | `0.72` |
-| `EMBEDDING_K` | Number of nearest neighbours to request from the index | `10` |
-| `EMBEDDING_NUM_CANDIDATES` | Candidate pool size for kNN search | `400` |
+| `EMBEDDING_K` | Number of nearest neighbours to retrieve from the index | `30` |
+| `EMBEDDING_NUM_CANDIDATES` | Candidate pool size for kNN search | `100` |
 
-> **Note on `EMBEDDING_K` and `EMBEDDING_NUM_CANDIDATES`**: kNN finds the top K documents first, then applies any `owning-body` filter. If filtering by city, set `EMBEDDING_K` high enough that city documents appear in the initial pool (e.g. `200`).
+> **Note on `EMBEDDING_K` and `EMBEDDING_NUM_CANDIDATES`**: the `owning-body` (city) filter is applied *inside* the kNN as a pre-filter, so HNSW searches only within that city's documents. A small `EMBEDDING_K` is therefore sufficient — it does **not** need to be inflated to survive a post-filter.
 
 ### Brief analysis on similarity scores
 
