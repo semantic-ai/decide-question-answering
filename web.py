@@ -16,7 +16,7 @@ from langchain.chat_models import init_chat_model
 
 router = APIRouter()
 
-SEARCH_API_URL = os.environ.get("SEARCH_API_URL")
+ELASTICSEARCH_URL = os.environ.get("ELASTICSEARCH_URL", "http://elasticsearch:9200")
 EMBEDDING_API_URL = os.environ.get("EMBEDDING_API_URL")
 GENERATION_ENDPOINT = os.environ.get("GENERATION_ENDPOINT")
 GENERATION_MODEL = os.environ.get("GENERATION_MODEL", "mistral-nemo")
@@ -26,8 +26,8 @@ GENERATION_TIMEOUT = float(os.environ.get("GENERATION_TIMEOUT", "300.0"))
 MAX_CONTENT_CHARS = int(os.environ.get("MAX_CONTENT_CHARS", "50000"))
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "10.0"))
 MIN_SCORE = float(os.environ.get("MIN_SCORE", "0.72"))
-EMBEDDING_K = int(os.environ.get("EMBEDDING_K", "10000"))
-EMBEDDING_NUM_CANDIDATES = int(os.environ.get("EMBEDDING_NUM_CANDIDATES", "10000"))
+EMBEDDING_K = int(os.environ.get("EMBEDDING_K", "30"))
+EMBEDDING_NUM_CANDIDATES = int(os.environ.get("EMBEDDING_NUM_CANDIDATES", "100"))
 TITLE_FALLBACK_CHARS = int(os.environ.get("TITLE_FALLBACK_CHARS", "80"))
 
 DEFAULT_ENRICHMENT_SPARQL_TEMPLATE = """
@@ -90,35 +90,55 @@ def embed_question(question: str) -> List[float]:
     return data.get("embedding", [])
 
 
+_EXPRESSIONS_INDEX = None
+
+
+def _expressions_index() -> str:
+    """Resolve (and cache) the Elasticsearch index mu-search built for expressions."""
+    global _EXPRESSIONS_INDEX
+    if _EXPRESSIONS_INDEX is None:
+        response = requests.get(
+            f"{ELASTICSEARCH_URL}/_cat/indices",
+            params={"h": "index,docs.count", "s": "docs.count:desc", "format": "json"},
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        _EXPRESSIONS_INDEX = next(
+            row["index"] for row in response.json() if not row["index"].startswith(".")
+        )
+    return _EXPRESSIONS_INDEX
+
+
 def semantic_search(question: str, top_n: int, local_authority: Optional[str] = None) -> List[SourceDoc]:
-    """Perform semantic search and return normalized source documents.
+    """Perform semantic search and return source documents.
 
-    Args:
-        question (str): The user question used for retrieval.
-        top_n (int): The maximum number of documents to return.
-        local_authority (str, optional): URI of the local authority to filter results by.
-
-    Returns:
-        List[SourceDoc]: The top retrieved documents, normalized to use `uri`
-        as the internal identifier.
+    Runs a pre-filtered kNN directly against Elasticsearch: the owning-body filter
+    sits *inside* the knn, so HNSW only searches within the selected city's documents
+    and a small `k` suffices. The resource URI is the Elasticsearch document `_id`.
     """
     embedding = embed_question(question)
-    embedding_string = ",".join(str(value) for value in embedding)
-    filter_params = {
-        ":embedding:description-vector": f"{EMBEDDING_K}:{EMBEDDING_NUM_CANDIDATES}:{embedding_string}",
+    # Hardcoded for testing: always filter to Stadt Bamberg decisions only.
+    owning_body = "https://decide.smartcitybamberg.de/organizations#c8e6b8ef-0a33-425a-b9d5-96354823f6e7"
+    body = {
+        "knn": {
+            "field": "description-vector",
+            "query_vector": embedding,
+            "k": EMBEDDING_K,
+            "num_candidates": EMBEDDING_NUM_CANDIDATES,
+            "filter": [{"term": {"owning-body": owning_body}}],
+        },
+        "size": top_n,
+        "_source": False,
     }
-    if local_authority:
-        filter_params["owning-body"] = local_authority
-    payload = {"filter": filter_params}
     response = requests.post(
-        SEARCH_API_URL,
-        json=payload,
+        f"{ELASTICSEARCH_URL}/{_expressions_index()}/_search",
+        json=body,
         headers={"Content-Type": "application/json"},
         timeout=REQUEST_TIMEOUT,
     )
     response.raise_for_status()
-    data = response.json()
-    results = normalize_search_results(data.get("data", []))
+    hits = response.json().get("hits", {}).get("hits", [])
+    results = [SourceDoc(uri=hit["_id"], score=hit.get("_score")) for hit in hits]
     results = [doc for doc in results if doc.score is None or doc.score >= MIN_SCORE]
     return results[:top_n]
 
