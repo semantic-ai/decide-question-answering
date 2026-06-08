@@ -10,12 +10,14 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List
-from escape_helpers import sparql_escape_uri
-from helpers import query
+from escape_helpers import sparql_escape_uri, sparql_escape_string, sparql_escape_datetime, sparql_escape
+from helpers import query, generate_uuid, update
 from langchain.chat_models import init_chat_model
+from datetime import datetime, timezone
 
 router = APIRouter()
 
+QUESTION_ANSWERING_GRAPH = os.environ.get("ELASTICSEARCH_URL", "http://mu.semte.ch/graphs/public/question-answering")
 ELASTICSEARCH_URL = os.environ.get("ELASTICSEARCH_URL", "http://elasticsearch:9200")
 EMBEDDING_API_URL = os.environ.get("EMBEDDING_API_URL")
 GENERATION_ENDPOINT = os.environ.get("GENERATION_ENDPOINT")
@@ -29,6 +31,11 @@ MIN_SCORE = float(os.environ.get("MIN_SCORE", "0.72"))
 EMBEDDING_K = int(os.environ.get("EMBEDDING_K", "30"))
 EMBEDDING_NUM_CANDIDATES = int(os.environ.get("EMBEDDING_NUM_CANDIDATES", "100"))
 TITLE_FALLBACK_CHARS = int(os.environ.get("TITLE_FALLBACK_CHARS", "80"))
+LLM_URI = f"{GENERATION_PROVIDER}:{GENERATION_MODEL}" # TODO: replace by proper LLM uri
+
+QUESTION_BASE_URI = "http://data.lblod.info/id/questions/"
+ANSWER_BASE_URI   = "http://data.lblod.info/id/answers/"
+QUOTATION_BASE_URI = "http://data.lblod.info/id/quotations/"
 
 DEFAULT_ENRICHMENT_SPARQL_TEMPLATE = """
 PREFIX eli: <http://data.europa.eu/eli/ontology#>
@@ -66,6 +73,8 @@ class SourceDoc(BaseModel):
 
 
 class AnswerResponse(BaseModel):
+    answer_id: str = Field(..., description="uuid of the answer.")
+    question_id: str = Field(..., description="uuid of the question.")
     answer: str = Field(..., description="Answer generated from the retrieved documents, in the same language as the question.")
     sources: List[SourceDoc] = Field(..., description="Documents used to generate the answer.")
 
@@ -233,8 +242,91 @@ def _get_llm():
         timeout=GENERATION_TIMEOUT,
     )
 
+def store_question(request: AnswerRequest) -> str:
+    """Persist a schema:Question to the triplestore and return the uuid for the question."""
+    question_uuid = generate_uuid()
+    question_uri  = f"{QUESTION_BASE_URI}{question_uuid}"
+    created = datetime.now(timezone.utc)
+    triples = f"""
+        <{question_uri}> a schema:Question ;
+            dct:created   {sparql_escape_datetime(created)} ;
+            schema:text   {sparql_escape_string(request.question)} .
+    """
+    if request.localAuthority:
+        triples += f"\n        <{question_uri}> ext:owningBody {sparql_escape_string(request.localAuthority)} ."
 
-def generate_answer(question: str, retrieved_docs: List[SourceDoc]) -> str:
+    update(f"""
+        PREFIX schema: <http://schema.org/>
+        PREFIX dct:    <http://purl.org/dc/terms/>
+        PREFIX ext:    <http://mu.semte.ch/vocabularies/ext/>
+        PREFIX xsd:    <http://www.w3.org/2001/XMLSchema#>
+
+        INSERT DATA {{
+          GRAPH <{QUESTION_ANSWERING_GRAPH}> {{
+            {triples}
+          }}
+        }}
+    """)
+    return question_uuid
+
+def store_question_prompt(question_uuid: str, prompt: str):
+    """Persist the prompt in a known schema:Question."""
+    question_uri  = f"{QUESTION_BASE_URI}{question_uuid}"
+    triples = f"""
+        <{question_uri}> dct:description {sparql_escape_string(prompt)} .
+    """
+    update(f"""
+        PREFIX dct:    <http://purl.org/dc/terms/>
+
+        INSERT DATA {{
+          GRAPH <{QUESTION_ANSWERING_GRAPH}> {{
+            {triples}
+          }}
+        }}
+    """)
+
+def store_question_answer(question_uuid: str, answer: str, sources: List[SourceDoc]) -> str:
+    """Persist the answer to a known schema:Question in the triplestore, and return the answer uuid."""
+    question_uri  = f"{QUESTION_BASE_URI}{question_uuid}"
+    created = datetime.now(timezone.utc)
+    answer_uuid = generate_uuid()
+    answer_uri  = f"{ANSWER_BASE_URI}{answer_uuid}"
+    llm_uri     = f"urn:llm:{GENERATION_PROVIDER}:{GENERATION_MODEL}"
+    triples = f"""
+        <{answer_uri}> a schema:Answer ;
+            dct:created   {sparql_escape_datetime(created)} ;
+            schema:text   {sparql_escape_string(answer)} ;
+            dct:creator  <{llm_uri}> .
+        <{question_uri}> schema:suggestedAnswer <{answer_uri}> .
+    """
+
+    for source in sources:
+        quotation_uuid = generate_uuid()
+        quotation_uri  = f"{QUOTATION_BASE_URI}{quotation_uuid}"
+        triples += f"\n        <{quotation_uri}> a schema:Quotation ;"
+        triples += f"\n            oa:hasSource {sparql_escape_uri(source.uri)} ;"
+        if source.score is not None:
+            triples += f"\n            ext:confidence {sparql_escape(source.score)} ."
+        triples += f"\n        <{answer_uri}> schema:citation <{quotation_uri}> ."
+
+    update(f"""
+        PREFIX schema: <http://schema.org/>
+        PREFIX dct:    <http://purl.org/dc/terms/>
+        PREFIX ext:    <http://mu.semte.ch/vocabularies/ext/>
+        PREFIX xsd:    <http://www.w3.org/2001/XMLSchema#>
+        PREFIX oa:     <http://www.w3.org/ns/oa#>
+
+        INSERT DATA {{
+          GRAPH <{QUESTION_ANSWERING_GRAPH}> {{
+            {triples}
+          }}
+        }}
+    """)
+    return answer_uuid
+
+
+
+def generate_answer(question: str, retrieved_docs: List[SourceDoc], question_id: str) -> str:
     """Generate an answer using the LLM with retrieved documents as context."""
     doc_blocks = []
     for i, doc in enumerate(retrieved_docs, start=1):
@@ -255,6 +347,7 @@ def generate_answer(question: str, retrieved_docs: List[SourceDoc]) -> str:
         "Do NOT answer in English unless the question is in English.\n\n"
         "Answer:"
     )
+    store_question_prompt(question_id, prompt)
     result = _get_llm().invoke(prompt)
     return result.content
 
@@ -262,12 +355,15 @@ def generate_answer(question: str, retrieved_docs: List[SourceDoc]) -> str:
 # Orchestration
 def process_request(request: AnswerRequest) -> AnswerResponse:
     """Main pipeline: question → search → LLM → response"""
+
+    question_id = store_question(request)
     sources = semantic_search(request.question, request.top_n or 5, request.localAuthority)
     if not sources:
         return AnswerResponse(answer="No relevant documents were found to answer this question.", sources=[])
     sources = fetch_documents(sources)
-    answer = generate_answer(request.question, sources)
-    return AnswerResponse(answer=answer, sources=sources)
+    answer = generate_answer(request.question, sources, question_id)
+    answer_id = store_question_answer(question_id, answer, sources)
+    return AnswerResponse(question_id=question_id, answer_id=answer_id, answer=answer, sources=sources)
 
 
 # FastAPI Endpoint
