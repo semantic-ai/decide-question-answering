@@ -112,21 +112,22 @@ def _expressions_index() -> str:
 def semantic_search(question: str, top_n: int, local_authority: Optional[str] = None) -> List[SourceDoc]:
     """Perform semantic search and return source documents.
 
-    Runs a pre-filtered kNN directly against Elasticsearch: the owning-body filter
-    sits *inside* the knn, so HNSW only searches within the selected city's documents
-    and a small `k` suffices. The resource URI is the Elasticsearch document `_id`.
+    Runs a pre-filtered kNN directly against Elasticsearch. When a local authority
+    URI is provided, its `owning-body` filter is applied *inside* the knn, so HNSW
+    only searches within that authority's documents and a small `k` suffices. The
+    resource URI is the Elasticsearch document `_id`.
     """
     embedding = embed_question(question)
-    # Hardcoded for testing: always filter to Stadt Bamberg decisions only.
-    owning_body = "https://decide.smartcitybamberg.de/organizations#c8e6b8ef-0a33-425a-b9d5-96354823f6e7"
+    knn = {
+        "field": "description-vector",
+        "query_vector": embedding,
+        "k": EMBEDDING_K,
+        "num_candidates": EMBEDDING_NUM_CANDIDATES,
+    }
+    if local_authority:
+        knn["filter"] = [{"term": {"owning-body": local_authority}}]
     body = {
-        "knn": {
-            "field": "description-vector",
-            "query_vector": embedding,
-            "k": EMBEDDING_K,
-            "num_candidates": EMBEDDING_NUM_CANDIDATES,
-            "filter": [{"term": {"owning-body": owning_body}}],
-        },
+        "knn": knn,
         "size": top_n,
         "_source": False,
     }
