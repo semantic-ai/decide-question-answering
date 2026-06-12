@@ -17,7 +17,6 @@ from datetime import datetime, timezone
 
 router = APIRouter()
 
-QUESTION_ANSWERING_GRAPH = os.environ.get("ELASTICSEARCH_URL", "http://mu.semte.ch/graphs/public/question-answering")
 ELASTICSEARCH_URL = os.environ.get("ELASTICSEARCH_URL", "http://elasticsearch:9200")
 EMBEDDING_API_URL = os.environ.get("EMBEDDING_API_URL")
 GENERATION_ENDPOINT = os.environ.get("GENERATION_ENDPOINT")
@@ -31,7 +30,6 @@ MIN_SCORE = float(os.environ.get("MIN_SCORE", "0.72"))
 EMBEDDING_K = int(os.environ.get("EMBEDDING_K", "30"))
 EMBEDDING_NUM_CANDIDATES = int(os.environ.get("EMBEDDING_NUM_CANDIDATES", "100"))
 TITLE_FALLBACK_CHARS = int(os.environ.get("TITLE_FALLBACK_CHARS", "80"))
-LLM_URI = f"{GENERATION_PROVIDER}:{GENERATION_MODEL}" # TODO: replace by proper LLM uri
 
 QUESTION_BASE_URI = "http://data.lblod.info/id/questions/"
 ANSWER_BASE_URI   = "http://data.lblod.info/id/answers/"
@@ -73,7 +71,7 @@ class SourceDoc(BaseModel):
 
 
 class AnswerResponse(BaseModel):
-    answer_id: str = Field(..., description="uuid of the answer.")
+    answer_id: Optional[str] = Field(None, description="uuid of the answer.")
     question_id: str = Field(..., description="uuid of the question.")
     answer: str = Field(..., description="Answer generated from the retrieved documents, in the same language as the question.")
     sources: List[SourceDoc] = Field(..., description="Documents used to generate the answer.")
@@ -253,7 +251,7 @@ def store_question(request: AnswerRequest) -> str:
             schema:text   {sparql_escape_string(request.question)} .
     """
     if request.localAuthority:
-        triples += f"\n        <{question_uri}> ext:owningBody {sparql_escape_string(request.localAuthority)} ."
+        triples += f"\n        <{question_uri}> ext:owningBody {sparql_escape_uri(request.localAuthority)} ."
 
     update(f"""
         PREFIX schema: <http://schema.org/>
@@ -262,9 +260,7 @@ def store_question(request: AnswerRequest) -> str:
         PREFIX xsd:    <http://www.w3.org/2001/XMLSchema#>
 
         INSERT DATA {{
-          GRAPH <{QUESTION_ANSWERING_GRAPH}> {{
-            {triples}
-          }}
+          {triples}
         }}
     """)
     return question_uuid
@@ -279,9 +275,7 @@ def store_question_prompt(question_uuid: str, prompt: str):
         PREFIX dct:    <http://purl.org/dc/terms/>
 
         INSERT DATA {{
-          GRAPH <{QUESTION_ANSWERING_GRAPH}> {{
-            {triples}
-          }}
+          {triples}
         }}
     """)
 
@@ -317,9 +311,7 @@ def store_question_answer(question_uuid: str, answer: str, sources: List[SourceD
         PREFIX oa:     <http://www.w3.org/ns/oa#>
 
         INSERT DATA {{
-          GRAPH <{QUESTION_ANSWERING_GRAPH}> {{
-            {triples}
-          }}
+          {triples}
         }}
     """)
     return answer_uuid
@@ -358,8 +350,8 @@ def process_request(request: AnswerRequest) -> AnswerResponse:
 
     question_id = store_question(request)
     sources = semantic_search(request.question, request.top_n or 5, request.localAuthority)
-    if not sources:
-        return AnswerResponse(answer="No relevant documents were found to answer this question.", sources=[])
+    if not sources: # when no relevant documents were found, no answer is generated, but the question is still stored
+        return AnswerResponse(question_id=question_id, answer="No relevant documents were found to answer this question.", sources=[])
     sources = fetch_documents(sources)
     answer = generate_answer(request.question, sources, question_id)
     answer_id = store_question_answer(question_id, answer, sources)

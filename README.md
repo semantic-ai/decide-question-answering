@@ -138,3 +138,9 @@ A threshold of `0.72–0.75` filters out clearly irrelevant questions while keep
 ### Possible improvements
 
 - **Cross-encoder reranking**: Add a reranking step between retrieval and generation. A cross-encoder reads the question and each document side by side and outputs a relevance score — more accurate than embeddings but slower. Use it as a second stage to re-score and filter after fast retrieval.
+
+### Storage of questions and answers
+
+This service will store every question it receives, along with the answer it gave, including context such as the prompt and sourced that were used.
+Through sparql-parser in `app-decide`, it stores these in a named graph: `http://mu.semte.ch/graphs/public/question-answering`.
+To clear the question answering graph, run `CLEAR SILENT GRAPH <http://mu.semte.ch/graphs/public/question-answering>`
