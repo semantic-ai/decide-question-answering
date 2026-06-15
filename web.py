@@ -16,7 +16,7 @@ from langchain.chat_models import init_chat_model
 
 router = APIRouter()
 
-ELASTICSEARCH_URL = os.environ.get("ELASTICSEARCH_URL", "http://elasticsearch:9200")
+SEARCH_API_URL = os.environ.get("SEARCH_API_URL", "http://search/expressions/search")
 EMBEDDING_API_URL = os.environ.get("EMBEDDING_API_URL")
 GENERATION_ENDPOINT = os.environ.get("GENERATION_ENDPOINT")
 GENERATION_MODEL = os.environ.get("GENERATION_MODEL", "mistral-nemo")
@@ -90,56 +90,42 @@ def embed_question(question: str) -> List[float]:
     return data.get("embedding", [])
 
 
-_EXPRESSIONS_INDEX = None
-
-
-def _expressions_index() -> str:
-    """Resolve (and cache) the Elasticsearch index mu-search built for expressions."""
-    global _EXPRESSIONS_INDEX
-    if _EXPRESSIONS_INDEX is None:
-        response = requests.get(
-            f"{ELASTICSEARCH_URL}/_cat/indices",
-            params={"h": "index,docs.count", "s": "docs.count:desc", "format": "json"},
-            timeout=REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-        _EXPRESSIONS_INDEX = next(
-            row["index"] for row in response.json() if not row["index"].startswith(".")
-        )
-    return _EXPRESSIONS_INDEX
-
-
 def semantic_search(question: str, top_n: int, local_authority: Optional[str] = None) -> List[SourceDoc]:
     """Perform semantic search and return source documents.
 
-    Runs a pre-filtered kNN directly against Elasticsearch. When a local authority
-    URI is provided, its `owning-body` filter is applied *inside* the knn, so HNSW
-    only searches within that authority's documents and a small `k` suffices. The
-    resource URI is the Elasticsearch document `_id`.
+    Sends a pre-filtered kNN as a raw Elasticsearch query to mu-search's
+    `/:type/search` endpoint (so mu-auth / allowed-groups still apply and we don't
+    hardcode the index). When a local authority URI is provided, its `owning-body`
+    term sits in the bool `filter` next to the `knn` in `must`, so Elasticsearch
+    pre-filters to that authority's documents and a small `k` suffices. The resource
+    URI is `attributes.uri`; the similarity score is the doc-level `score`.
     """
     embedding = embed_question(question)
-    knn = {
-        "field": "description-vector",
-        "query_vector": embedding,
-        "k": EMBEDDING_K,
-        "num_candidates": EMBEDDING_NUM_CANDIDATES,
+    bool_query = {
+        "must": [{
+            "knn": {
+                "field": "description-vector",
+                "query_vector": embedding,
+                "k": EMBEDDING_K,
+                "num_candidates": EMBEDDING_NUM_CANDIDATES,
+            }
+        }]
     }
     if local_authority:
-        knn["filter"] = [{"term": {"owning-body": local_authority}}]
-    body = {
-        "knn": knn,
-        "size": top_n,
-        "_source": False,
-    }
+        bool_query["filter"] = [{"term": {"owning-body": local_authority}}]
+    body = {"query": {"bool": bool_query}, "size": top_n}
     response = requests.post(
-        f"{ELASTICSEARCH_URL}/{_expressions_index()}/_search",
+        SEARCH_API_URL,
         json=body,
         headers={"Content-Type": "application/json"},
         timeout=REQUEST_TIMEOUT,
     )
     response.raise_for_status()
-    hits = response.json().get("hits", {}).get("hits", [])
-    results = [SourceDoc(uri=hit["_id"], score=hit.get("_score")) for hit in hits]
+    data = response.json().get("data", [])
+    results = [
+        SourceDoc(uri=doc["attributes"]["uri"], score=doc.get("score"))
+        for doc in data if doc.get("attributes", {}).get("uri")
+    ]
     results = [doc for doc in results if doc.score is None or doc.score >= MIN_SCORE]
     return results[:top_n]
 

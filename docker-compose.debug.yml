@@ -16,7 +16,7 @@ services:
       - ./config:/config
     environment:
       MODE: "development"
-      SEARCH_API_URL: "http://search:80/expressions/large-search"
+      SEARCH_API_URL: "http://search:80/expressions/search"
       LOG_SPARQL_ALL: "false"
       EMBEDDING_API_URL: "http://embedding:80/embed"
       MU_SPARQL_ENDPOINT: "http://database:8890/sparql"
