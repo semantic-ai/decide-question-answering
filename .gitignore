@@ -9,3 +9,4 @@
 *.pyc
 
 docker-compose.override.yml
+.env
