@@ -1,6 +1,6 @@
 """
 Question Answering RAG System
-Flow: question → embedding API → semantic search → top 3 decisions → response
+Flow: question → embedding API → semantic search → top N decisions → response
 """
 
 import os
@@ -16,16 +16,20 @@ from langchain.chat_models import init_chat_model
 
 router = APIRouter()
 
-SEARCH_API_URL = os.environ.get("SEARCH_API_URL")
+SEARCH_API_URL = os.environ.get("SEARCH_API_URL", "http://search/expressions/search")
 EMBEDDING_API_URL = os.environ.get("EMBEDDING_API_URL")
 GENERATION_ENDPOINT = os.environ.get("GENERATION_ENDPOINT")
 GENERATION_MODEL = os.environ.get("GENERATION_MODEL", "mistral-nemo")
 GENERATION_PROVIDER = os.environ.get("GENERATION_PROVIDER", "ollama")
 GENERATION_API_KEY = os.environ.get("GENERATION_API_KEY")
 GENERATION_TIMEOUT = float(os.environ.get("GENERATION_TIMEOUT", "300.0"))
-MAX_CONTENT_CHARS = int(os.environ.get("MAX_CONTENT_CHARS", "1000"))
+MAX_CONTENT_CHARS = int(os.environ.get("MAX_CONTENT_CHARS", "50000"))
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "10.0"))
-EMBEDDING_VECTOR_PREFIX = "5:50"
+MIN_SCORE = float(os.environ.get("MIN_SCORE", "0.72"))
+EMBEDDING_K = int(os.environ.get("EMBEDDING_K", "30"))
+EMBEDDING_NUM_CANDIDATES = int(os.environ.get("EMBEDDING_NUM_CANDIDATES", "100"))
+TITLE_FALLBACK_CHARS = int(os.environ.get("TITLE_FALLBACK_CHARS", "80"))
+
 DEFAULT_ENRICHMENT_SPARQL_TEMPLATE = """
 PREFIX eli: <http://data.europa.eu/eli/ontology#>
 PREFIX epvoc: <https://data.europarl.europa.eu/def/epvoc#>
@@ -50,13 +54,15 @@ except OSError:
 # Request/Response Models
 class AnswerRequest(BaseModel):
     question: str = Field(..., description="The question to answer.", examples=["Welke subsidies zijn er voor dakisolatie?"])
-    top_n: Optional[int] = Field(5, description="Number of source documents to retrieve.", ge=3, le=20)
+    top_n: Optional[int] = Field(5, description="Number of source documents to retrieve.", ge=1, le=20)
+    localAuthority: Optional[str] = Field(None, description="URI of the local authority to filter by.")
 
 
 class SourceDoc(BaseModel):
     uri: str = Field(..., description="URI of the source document.")
     title: Optional[str] = Field(None, description="Document title.")
     content: Optional[str] = Field(None, description="Relevant excerpt used to generate the answer.")
+    score: Optional[float] = Field(None, description="Similarity score from semantic search.")
 
 
 class AnswerResponse(BaseModel):
@@ -84,33 +90,61 @@ def embed_question(question: str) -> List[float]:
     return data.get("embedding", [])
 
 
-def semantic_search(question: str, top_n: int) -> List[SourceDoc]:
-    """Perform semantic search and return normalized source documents.
+def semantic_search(question: str, top_n: int, local_authority: Optional[str] = None) -> List[SourceDoc]:
+    """Perform semantic search and return source documents.
 
-    Args:
-        question (str): The user question used for retrieval.
-        top_n (int): The maximum number of documents to return.
-
-    Returns:
-        List[SourceDoc]: The top retrieved documents, normalized to use `uri`
-        as the internal identifier.
+    Sends a pre-filtered kNN as a raw Elasticsearch query to mu-search's
+    `/:type/search` endpoint (so mu-auth / allowed-groups still apply and we don't
+    hardcode the index). When a local authority URI is provided, its `owning-body`
+    term sits in the bool `filter` next to the `knn` in `must`, so Elasticsearch
+    pre-filters to that authority's documents and a small `k` suffices. The resource
+    URI is `attributes.uri`; the similarity score is the doc-level `score`.
     """
     embedding = embed_question(question)
-    embedding_string = ",".join(str(value) for value in embedding)
-    payload = {
-        "filter": {
-            ":embedding:description-vector": f"{EMBEDDING_VECTOR_PREFIX}:{embedding_string}",
-        }
+    bool_query = {
+        "must": [{
+            "knn": {
+                "field": "description-vector",
+                "query_vector": embedding,
+                "k": EMBEDDING_K,
+                "num_candidates": EMBEDDING_NUM_CANDIDATES,
+            }
+        }]
     }
+    if local_authority:
+        bool_query["filter"] = [{"term": {"owning-body": local_authority}}]
+    body = {"query": {"bool": bool_query}, "size": top_n}
     response = requests.post(
         SEARCH_API_URL,
-        json=payload,
+        json=body,
         headers={"Content-Type": "application/json"},
         timeout=REQUEST_TIMEOUT,
     )
     response.raise_for_status()
-    data = response.json()
-    return normalize_search_results(data.get("data", [])[:top_n])
+    data = response.json().get("data", [])
+    results = [
+        SourceDoc(uri=doc["attributes"]["uri"], score=doc.get("score"))
+        for doc in data if doc.get("attributes", {}).get("uri")
+    ]
+    results = [doc for doc in results if doc.score is None or doc.score >= MIN_SCORE]
+    return results[:top_n]
+
+
+def _derive_title(title: Optional[str], content: Optional[str]) -> Optional[str]:
+    """Return a display title for a source document.
+
+    Prefers an actual title (direct ``eli:title`` or one supplied via an
+    annotation). When none is available — e.g. Bamberg expressions without a
+    title annotation, or one with an empty value — it falls back to the first
+    ``TITLE_FALLBACK_CHARS`` characters of the content, with markdown markers
+    and redundant whitespace stripped. Returns ``None`` if neither exists.
+    """
+    if title and title.strip():
+        return title.strip()
+    if content and content.strip():
+        snippet = " ".join(content.split()).lstrip("*# ").strip()
+        return snippet[:TITLE_FALLBACK_CHARS] or None
+    return None
 
 
 def fetch_documents(sources: List[SourceDoc]) -> List[SourceDoc]:
@@ -135,15 +169,25 @@ def fetch_documents(sources: List[SourceDoc]) -> List[SourceDoc]:
     doc_map: dict[str, dict] = {}
     for binding in data.get("results", {}).get("bindings", []):
         subject = binding.get("s", {}).get("value")
+        if not subject:
+            continue
         title = binding.get("title", {}).get("value")
         content = binding.get("content", {}).get("value")
-        if subject and subject not in doc_map:
-            doc_map[subject] = {"title": title, "content": " ".join(content.split()) if content else content}
+        entry = doc_map.setdefault(subject, {"title": None, "content": None})
+        if content and not entry["content"]:
+            entry["content"] = " ".join(content.split())
+        if title and title.strip() and not (entry["title"] and entry["title"].strip()):
+            entry["title"] = title.strip()
+
+    # Fall back to a content snippet when no usable title was found.
+    for entry in doc_map.values():
+        entry["title"] = _derive_title(entry["title"], entry["content"])
 
     return [
-        SourceDoc(uri=source.uri, **doc_map.get(source.uri, {}))
+        SourceDoc(uri=source.uri, score=source.score, **doc_map.get(source.uri, {}))
         for source in sources
     ]
+
 
 
 def normalize_search_results(docs: List[dict]) -> List[SourceDoc]:
@@ -157,7 +201,10 @@ def normalize_search_results(docs: List[dict]) -> List[SourceDoc]:
         returns document identifiers as `id`, but within this service we
         expose and work with them as `uri`.
     """
-    return [SourceDoc(uri=doc["id"]) for doc in docs if doc.get("id")]
+    return [
+        SourceDoc(uri=doc["attributes"]["uri"], score=doc.get("score"))
+        for doc in docs if doc.get("attributes", {}).get("uri")
+    ]
 
 def _get_llm():
     """Instantiate the LLM for the configured provider. Returns a BaseChatModel.
@@ -183,7 +230,7 @@ def generate_answer(question: str, retrieved_docs: List[SourceDoc]) -> str:
 
     context = "\n\n".join(doc_blocks)
     prompt = (
-        "You are a helpful assistant answering questions about subsidies.\n\n"
+        "You are a helpful assistant answering questions about city council decisions.\n\n"
         "Below are retrieved documents that may or may not be relevant to the question. "
         "Use only the documents that are actually relevant to answer the question. "
         "If none of the documents are relevant, say so.\n"
@@ -200,8 +247,10 @@ def generate_answer(question: str, retrieved_docs: List[SourceDoc]) -> str:
 
 # Orchestration
 def process_request(request: AnswerRequest) -> AnswerResponse:
-    """Main UC2 pipeline: question → search → LLM → response"""
-    sources = semantic_search(request.question, request.top_n or 3)
+    """Main pipeline: question → search → LLM → response"""
+    sources = semantic_search(request.question, request.top_n or 5, request.localAuthority)
+    if not sources:
+        return AnswerResponse(answer="No relevant documents were found to answer this question.", sources=[])
     sources = fetch_documents(sources)
     answer = generate_answer(request.question, sources)
     return AnswerResponse(answer=answer, sources=sources)

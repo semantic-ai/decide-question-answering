@@ -1,8 +1,19 @@
 PREFIX eli: <http://data.europa.eu/eli/ontology#>
 PREFIX epvoc: <https://data.europarl.europa.eu/def/epvoc#>
+PREFIX oa: <http://www.w3.org/ns/oa#>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 SELECT ?s ?title ?content
 WHERE {
   VALUES ?s { {{values}} }
-  ?s eli:title ?title .
+  # direct title (e.g. Gent expressions)
+  OPTIONAL { ?s eli:title ?directTitle . }
+  # fallback: title added via annotation (e.g. Bamberg) ->
+  # Annotation -hasTarget-> SpecificResource -hasSource-> ?s, body asserts eli:title
+  OPTIONAL {
+    ?s ^oa:hasSource / ^oa:hasTarget / oa:hasBody ?body .
+    ?body rdf:predicate eli:title ;
+          rdf:object ?annotatedTitle .
+  }
+  BIND(IF(BOUND(?directTitle), ?directTitle, ?annotatedTitle) AS ?title)
   OPTIONAL { ?s epvoc:expressionContent ?content . }
 }

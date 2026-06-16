@@ -1,15 +1,13 @@
-## UC2 Subsidies RAG System
+## Local decision question answering RAG System
 
-This service implements the HTTP flow for a subsidies RAG (Retrieval-Augmented Generation) system.
+This service implements the HTTP flow for a local decision question answering RAG (Retrieval-Augmented Generation) system.
 
 The flow is based on the following:
 - Create an HTTP service that accepts a question in JSON format.
 - Call the embedding service to obtain an embedding for the question.
-- Use the embedding to perform a semantic search and return the top retrieved decisions together with their URIs.
+- Use the embedding to perform a pre-filtered kNN search via mu-search's raw-DSL `/:type/search` endpoint (the `owning-body`/city filter sits in the `bool` `filter` next to the `knn`, so Elasticsearch pre-filters to that city) and return the top retrieved decisions together with their URIs.
 - Resolve the titles and content of the retrieved decisions from the SPARQL endpoint.
 - Pass the question plus the retrieved documents to an LLM to generate a response.
-
-*Note: Relevance scoring and threshold filtering are not yet implemented as the retrieval API does not return per-document scores. The current default is to return the first 3 retrieved documents.*
 
 ### Disclaimer
 
@@ -28,30 +26,46 @@ The generation step uses LangChain's [`init_chat_model`](https://python.langchai
 
 To switch providers, change `GENERATION_PROVIDER` and `GENERATION_MODEL` and install the matching `langchain-<provider>` package in `requirements.txt`. No code changes needed.
 
+**Example — self-hosted Ollama (default):**
+
+```yaml
+GENERATION_PROVIDER: "ollama"
+GENERATION_ENDPOINT: "http://ollama:11434"
+GENERATION_MODEL: "mistral-nemo"
+```
+
+**Example — Mistral cloud:**
+
+```yaml
+GENERATION_PROVIDER: "mistralai"
+GENERATION_MODEL: "mistral-large"
+GENERATION_API_KEY: "<your-mistral-api-key>"
+```
+
+Cloud providers use `GENERATION_API_KEY` instead of `GENERATION_ENDPOINT`, and require the matching package (e.g. `langchain-mistralai`) in `requirements.txt`.
+
 ### Setup
 
 ```bash
 docker compose -f docker-compose.debug.yml up --build
 ```
 
-### Enrichment query configuration
+### Config files
 
-The service reads its enrichment SPARQL query from:
+The following file is read from `/config` at startup (mounted via `docker-compose.debug.yml`):
 
-- `/config/enrichment-query.rq`
-
-The debug compose file mounts the local `config` folder to `/config`, so this file is picked up automatically during local development.
-
-For reuse in other apps, mount an app-specific folder to `/config` (for example `./config/question-answering/:/config`) and provide an `enrichment-query.rq` in that folder. This allows changing enrichment behavior (for example from "decisions" to another domain) without changing service code.
+| File | Purpose |
+|---|---|
+| `enrichment-query.rq` | SPARQL query to fetch title and content for retrieved URIs |
 
 ### Verification
 
 ```bash
-curl -X POST http://localhost:8000/uc2/answer -H "Content-Type: application/json" -d "{\"question\": \"What subsidies exist for renovating an older home?\"}"
+curl -X POST http://localhost:8000/question-answering/answer -H "Content-Type: application/json" -d "{\"question\": \"What subsidies exist for renovating an older home?\"}"
 ```
 
 ```bash
-curl -X POST http://localhost:8000/uc2/answer -H "Content-Type: application/json" -d "{\"question\": \"Als ik iets aan mijn huis verbouw, ben ik dan zelf verantwoordelijk voor beschadigingen aan de inrichting van het openbaar domein, groenaanleg, bermen, trottoirs, boordstenen, straatkolken en de rijweg die te wijten zijn aan de bouwactiviteit ?\"}"
+curl -X POST http://localhost:8000/question-answering/answer -H "Content-Type: application/json" -d "{\"question\": \"Als ik iets aan mijn huis verbouw, ben ik dan zelf verantwoordelijk voor beschadigingen aan de inrichting van het openbaar domein, groenaanleg, bermen, trottoirs, boordstenen, straatkolken en de rijweg die te wijten zijn aan de bouwactiviteit ?\"}"
 ```
 
 ### Expected input
@@ -59,12 +73,14 @@ curl -X POST http://localhost:8000/uc2/answer -H "Content-Type: application/json
 ```json
 {
   "question": "What subsidies exist for renovating an older home?",
-  "top_n": 3
+  "top_n": 5,
+  "localAuthority": "http://data.lblod.info/id/bestuurseenheden/6358381406fcce10a7eba9b6a1257626"
 }
 ```
 
-- `question`: The current user question being asked
-- `top_n`: Optional number of retrieved documents to include, defaults to `3`
+- `question`: The user question
+- `top_n`: Max documents to include in the answer (default: `5`)
+- `localAuthority`: Optional URI of the local authority to filter results by
 
 ### Expected output
 
@@ -75,7 +91,8 @@ curl -X POST http://localhost:8000/uc2/answer -H "Content-Type: application/json
     {
       "uri": "https://example.org/document/1",
       "title": "Example title",
-      "content": "Document content text..."
+      "content": "Document content text...",
+      "score": 0.812
     }
   ]
 }
@@ -86,8 +103,38 @@ curl -X POST http://localhost:8000/uc2/answer -H "Content-Type: application/json
   - `uri`: The document identifier returned by the retrieval API.
   - `title`: The document title resolved from the SPARQL endpoint.
   - `content`: The document content resolved from the SPARQL endpoint.
+  - `score`: The similarity score from the retrieval API (may be `null`).
+
+### Other environment variables
+
+| Variable | Description | Default |
+|---|---|---|
+| `SEARCH_API_URL` | mu-search raw-DSL search endpoint (accepts a raw Elasticsearch query) | `http://search:80/expressions/search` |
+| `EMBEDDING_API_URL` | Embedding service endpoint | — |
+| `GENERATION_TIMEOUT` | LLM request timeout in seconds | `300.0` |
+| `MAX_CONTENT_CHARS` | Max characters of document content passed to the LLM | `1000` |
+| `REQUEST_TIMEOUT` | Timeout for calls to search and embedding services (seconds) | `10.0` |
+| `MIN_SCORE` | Minimum similarity score to include a document | `0.72` |
+| `EMBEDDING_K` | Number of nearest neighbours to retrieve from the index | `30` |
+| `EMBEDDING_NUM_CANDIDATES` | Candidate pool size for kNN search | `100` |
+
+> **Note on `EMBEDDING_K` and `EMBEDDING_NUM_CANDIDATES`**: the `owning-body` (city) filter sits in the `bool` `filter` alongside the `knn`, so Elasticsearch pre-filters to that city before the kNN. A small `EMBEDDING_K` is therefore sufficient — it does **not** need to be inflated to survive a post-filter.
+
+### Brief analysis on similarity scores
+
+Top 50 results, `k=50`, `num_candidates=400`:
+
+| Question | Score range |
+|---|---|
+| "welke smaken ijsjes zijn er?" | 0.630–0.639 |
+| "als ik 2 muntjes gooi, wat is de kans dat ik 2 keer kop krijg?" | 0.674–0.699 |
+| "qpwojednewd ewpirmfwef pwqoejk wef" | 0.688–0.703 |
+| "kan ik bij de toeristische dienst een fiets huren?" | 0.708–0.743 |
+| "wie is er verantwoordelijk voor schade aan het trottoir bij een verbouwing?" | 0.761–0.797 |
+| "waar moet ik op letten als ik een halloweentocht wil organiseren?" | 0.769–0.817 |
+
+A threshold of `0.72–0.75` filters out clearly irrelevant questions while keeping relevant ones. The current default is `0.72`.
 
 ### Possible improvements
 
-- **Relevance scores from retrieval API**: The search API currently does not return similarity scores. If scores were available, we could filter out low-relevance documents before passing them to the LLM, reducing noise and improving answer quality.
-- **Cross-encoder reranking**: Add a reranking step between retrieval and generation. A cross-encoder is a small model that takes a question and a document together as input and outputs a relevance score. Unlike embeddings (which compress text into vectors separately and then compare), a cross-encoder reads both texts side by side, so it catches nuances that embeddings miss. The trade-off is that it's slower (it must run once per document), which is why it's used as a second stage: fast retrieval narrows down candidates, then the cross-encoder re-scores and filters them before passing to the LLM.
+- **Cross-encoder reranking**: Add a reranking step between retrieval and generation. A cross-encoder reads the question and each document side by side and outputs a relevance score — more accurate than embeddings but slower. Use it as a second stage to re-score and filter after fast retrieval.
