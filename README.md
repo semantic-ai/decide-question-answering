@@ -42,6 +42,12 @@ GENERATION_ENDPOINT: "http://ollama:11434"
 GENERATION_MODEL: "mistral-nemo"
 ```
 
+When the provider is `ollama`, the service automatically pulls `GENERATION_MODEL` **at startup** if it isn't already present in Ollama (it checks `/api/show` and, if missing, calls `/api/pull`). So you can point `GENERATION_MODEL` at any model from the [Ollama library](https://ollama.com/library), e.g. `gemma4:12b`, without pre-pulling it.
+
+This is fail-fast: the service does not finish starting until the model is available, and if the model can't be pulled (it doesn't exist, the disk is full, etc.) the container exits instead of starting. The pull can take a while for large models — tune `OLLAMA_PULL_TIMEOUT` if needed. Because the `ollama` container may still be booting when this service starts, startup waits up to `OLLAMA_STARTUP_WAIT` seconds for Ollama to become reachable before treating it as an error (so a boot-order race doesn't kill the service).
+
+>**Caution — disk usage.** Pulled models are downloaded in full and stored in Ollama's volume (`../data/ollama`), and they are **never removed automatically**. Models are large so repeatedly changing `GENERATION_MODEL` will quietly accumulate gigabytes and can fill the host disk. Make sure the host has room for the model you configure, and periodically prune unused models with `ollama rm <model>` (or by clearing the volume).
+
 ### Setup
 
 ```bash
@@ -110,6 +116,8 @@ curl -X POST http://localhost:8000/question-answering/answer -H "Content-Type: a
 | `SEARCH_API_URL` | mu-search raw-DSL search endpoint (accepts a raw Elasticsearch query) | `http://search:80/expressions/search` |
 | `EMBEDDING_API_URL` | Embedding service endpoint | — |
 | `GENERATION_TIMEOUT` | LLM request timeout in seconds | `300.0` |
+| `OLLAMA_PULL_TIMEOUT` | Timeout (seconds) for auto-pulling a missing Ollama model on first use | `1800.0` |
+| `OLLAMA_STARTUP_WAIT` | Seconds to wait at startup for Ollama to become reachable before failing | `60.0` |
 | `MAX_CONTENT_CHARS` | Max characters of document content passed to the LLM | `1000` |
 | `REQUEST_TIMEOUT` | Timeout for calls to search and embedding services (seconds) | `10.0` |
 | `MIN_SCORE` | Minimum similarity score to include a document | `0.72` |

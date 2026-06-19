@@ -4,6 +4,8 @@ Flow: question → embedding API → semantic search → top N decisions → res
 """
 
 import os
+import json
+import time
 import requests
 from fastapi import APIRouter
 from fastapi.openapi.docs import get_swagger_ui_html
@@ -24,6 +26,8 @@ GENERATION_MODEL = os.environ.get("GENERATION_MODEL", "mistral-nemo")
 GENERATION_PROVIDER = os.environ.get("GENERATION_PROVIDER", "ollama")
 GENERATION_API_KEY = os.environ.get("GENERATION_API_KEY")
 GENERATION_TIMEOUT = float(os.environ.get("GENERATION_TIMEOUT", "300.0"))
+OLLAMA_PULL_TIMEOUT = float(os.environ.get("OLLAMA_PULL_TIMEOUT", "1800.0"))
+OLLAMA_STARTUP_WAIT = float(os.environ.get("OLLAMA_STARTUP_WAIT", "60.0"))
 MAX_CONTENT_CHARS = int(os.environ.get("MAX_CONTENT_CHARS", "50000"))
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "10.0"))
 MIN_SCORE = float(os.environ.get("MIN_SCORE", "0.72"))
@@ -213,6 +217,61 @@ def normalize_search_results(docs: List[dict]) -> List[SourceDoc]:
         for doc in docs if doc.get("attributes", {}).get("uri")
     ]
 
+def _ensure_ollama_model() -> None:
+    """Pull GENERATION_MODEL into Ollama at startup if it isn't already present.
+
+    Ollama's chat endpoint won't pull a missing model on demand (it 404s), so we
+    check ``/api/show`` and, if absent, ``/api/pull``. Blocks until ready and raises
+    on failure, so the service refuses to start with an unavailable model rather than
+    failing on the first request. Waits up to OLLAMA_STARTUP_WAIT seconds for Ollama
+    to be reachable (it may still be booting). Assumes the provider is Ollama and
+    GENERATION_ENDPOINT is set — see the guarded startup call below.
+    """
+    base = GENERATION_ENDPOINT.rstrip("/")
+
+    # Ollama may not be up yet at startup — wait (bounded) for it to answer before
+    # treating an error as fatal, so a boot-order race doesn't crash the service.
+    deadline = time.monotonic() + OLLAMA_STARTUP_WAIT
+    while True:
+        try:
+            show = requests.post(
+                f"{base}/api/show", json={"model": GENERATION_MODEL}, timeout=REQUEST_TIMEOUT
+            )
+            break
+        except requests.RequestException as exc:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"Ollama at {base} not reachable after {OLLAMA_STARTUP_WAIT}s: {exc}"
+                ) from exc
+            print(f"Waiting for Ollama at {base} to become available...", flush=True)
+            time.sleep(3)
+
+    if show.status_code == 200:
+        print(f"Ollama model '{GENERATION_MODEL}' already present.", flush=True)
+        return
+    if show.status_code != 404:
+        show.raise_for_status()
+
+    # Model is absent — pull it. /api/pull streams NDJSON status lines.
+    print(f"Ollama model '{GENERATION_MODEL}' not found; pulling it (this may take a while)...", flush=True)
+    with requests.post(
+        f"{base}/api/pull",
+        json={"model": GENERATION_MODEL},
+        stream=True,
+        timeout=OLLAMA_PULL_TIMEOUT,
+    ) as response:
+        response.raise_for_status()
+        for line in response.iter_lines():
+            if not line:
+                continue
+            status = json.loads(line)
+            if status.get("error"):
+                raise RuntimeError(
+                    f"Failed to pull Ollama model '{GENERATION_MODEL}': {status['error']}"
+                )
+    print(f"Ollama model '{GENERATION_MODEL}' is ready.", flush=True)
+
+
 def _get_llm():
     """Instantiate the LLM for the configured provider. Returns a BaseChatModel.
     Uses LangChain's init_chat_model with a 'provider:model' string — no provider-specific
@@ -361,3 +420,6 @@ def custom_swagger_ui() -> HTMLResponse:
 )
 def answer_endpoint(request: AnswerRequest):
     return process_request(request)
+
+if GENERATION_PROVIDER == "ollama" and GENERATION_ENDPOINT:
+    _ensure_ollama_model()
