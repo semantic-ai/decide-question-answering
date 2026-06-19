@@ -421,10 +421,5 @@ def custom_swagger_ui() -> HTMLResponse:
 def answer_endpoint(request: AnswerRequest):
     return process_request(request)
 
-
-# When Ollama is the generation provider, pull the configured model before we start
-# serving. Runs once at import (startup); raises — and so prevents the service from
-# starting — if the model can't be made available. Skipped entirely for API providers
-# (mistralai, openai, ...), where there is nothing to pull.
 if GENERATION_PROVIDER == "ollama" and GENERATION_ENDPOINT:
     _ensure_ollama_model()
