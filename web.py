@@ -292,6 +292,7 @@ def store_question(request: AnswerRequest) -> str:
     created = datetime.now(timezone.utc)
     triples = f"""
         <{question_uri}> a schema:Question ;
+            mu:uuid       {sparql_escape_string(question_uuid)}
             dct:created   {sparql_escape_datetime(created)} ;
             schema:text   {sparql_escape_string(request.question)} .
     """
@@ -303,6 +304,7 @@ def store_question(request: AnswerRequest) -> str:
         PREFIX dct:    <http://purl.org/dc/terms/>
         PREFIX ext:    <http://mu.semte.ch/vocabularies/ext/>
         PREFIX xsd:    <http://www.w3.org/2001/XMLSchema#>
+        PREFIX mu: <http://mu.semte.ch/vocabularies/core/>
 
         INSERT DATA {{
           {triples}
@@ -333,6 +335,7 @@ def store_question_answer(question_uuid: str, answer: str, sources: List[SourceD
     llm_uri     = f"urn:llm:{GENERATION_PROVIDER}:{GENERATION_MODEL}"
     triples = f"""
         <{answer_uri}> a schema:Answer ;
+            mu:uuid       {sparql_escape_string(answer_uuid)}
             dct:created   {sparql_escape_datetime(created)} ;
             schema:text   {sparql_escape_string(answer)} ;
             dct:creator  <{llm_uri}> .
@@ -354,6 +357,7 @@ def store_question_answer(question_uuid: str, answer: str, sources: List[SourceD
         PREFIX ext:    <http://mu.semte.ch/vocabularies/ext/>
         PREFIX xsd:    <http://www.w3.org/2001/XMLSchema#>
         PREFIX oa:     <http://www.w3.org/ns/oa#>
+        PREFIX mu: <http://mu.semte.ch/vocabularies/core/>
 
         INSERT DATA {{
           {triples}
