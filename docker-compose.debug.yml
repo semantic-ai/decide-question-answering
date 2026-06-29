@@ -17,7 +17,7 @@ services:
     environment:
       MODE: "development"
       SEARCH_API_URL: "http://search:80/expressions/search"
-      LOG_SPARQL_ALL: "false"
+      LOG_SPARQL_ALL: "true"
       EMBEDDING_API_URL: "http://embedding:80/embed"
       MU_SPARQL_ENDPOINT: "http://database:8890/sparql"
       MU_SPARQL_TIMEOUT: "30"
@@ -33,10 +33,10 @@ services:
       MAX_CONTENT_CHARS: "50000"
       REQUEST_TIMEOUT: "10.0"
       ALLOW_MU_AUTH_SUDO: "true"
+      DEFAULT_MU_AUTH_SCOPE: "http://services.semantic.works/decide-question-answering-service"
     networks:
-      - debug
-      - default
+      - app-decide_default
 
 networks:
-  debug:
+  app-decide_default:
     external: true

@@ -1,19 +1,30 @@
 PREFIX eli: <http://data.europa.eu/eli/ontology#>
 PREFIX epvoc: <https://data.europarl.europa.eu/def/epvoc#>
-PREFIX oa: <http://www.w3.org/ns/oa#>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-SELECT ?s ?title ?content
+PREFIX oa: <http://www.w3.org/ns/oa#>
+SELECT ?s ?title ?content ?downloadUrl
 WHERE {
   VALUES ?s { {{values}} }
-  # direct title (e.g. Gent expressions)
-  OPTIONAL { ?s eli:title ?directTitle . }
-  # fallback: title added via annotation (e.g. Bamberg) ->
-  # Annotation -hasTarget-> SpecificResource -hasSource-> ?s, body asserts eli:title
-  OPTIONAL {
-    ?s ^oa:hasSource / ^oa:hasTarget / oa:hasBody ?body .
-    ?body rdf:predicate eli:title ;
-          rdf:object ?annotatedTitle .
+  ?s a eli:Expression .
+  {
+    ?s eli:title ?title .
+  } UNION {
+    ?annotation oa:hasTarget / oa:hasSource ?s .
+    ?annotation oa:hasBody ?body .
+    ?body rdf:predicate eli:title .
+    ?body rdf:object ?title .
+  } UNION {
+    ?s a eli:Expression.
   }
-  BIND(IF(BOUND(?directTitle), ?directTitle, ?annotatedTitle) AS ?title)
+
+  {
+    ?s <http://www.w3.org/ns/prov#wasDerivedFrom> ?downloadUrl .
+  } UNION {
+    ?s <http://data.europa.eu/eli/ontology#is_embodied_by> / <http://data.europa.eu/eli/ontology#is_exemplified_by> ?downloadUrl .
+    FILTER(!STRSTARTS(STR(?downloadUrl), "http://internal-files/"))
+  } UNION {
+    ?s a eli:Expression.
+  }
+  
   OPTIONAL { ?s epvoc:expressionContent ?content . }
 }

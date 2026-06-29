@@ -42,10 +42,32 @@ QUOTATION_BASE_URI = "http://data.lblod.info/id/quotations/"
 DEFAULT_ENRICHMENT_SPARQL_TEMPLATE = """
 PREFIX eli: <http://data.europa.eu/eli/ontology#>
 PREFIX epvoc: <https://data.europarl.europa.eu/def/epvoc#>
-SELECT ?s ?title ?content
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX oa: <http://www.w3.org/ns/oa#>
+SELECT ?s ?title ?content ?downloadUrl
 WHERE {
   VALUES ?s { {{values}} }
-  ?s eli:title ?title .
+  ?s a eli:Expression .
+  {
+    ?s eli:title ?title .
+  } UNION {
+    ?annotation oa:hasTarget / oa:hasSource ?s .
+    ?annotation oa:hasBody ?body .
+    ?body rdf:predicate eli:title .
+    ?body rdf:object ?title .
+  } UNION {
+    ?s a eli:Expression.
+  }
+
+  {
+    ?s <http://www.w3.org/ns/prov#wasDerivedFrom> ?downloadUrl .
+  } UNION {
+    ?s <http://data.europa.eu/eli/ontology#is_embodied_by> / <http://data.europa.eu/eli/ontology#is_exemplified_by> ?downloadUrl .
+    FILTER(!STRSTARTS(STR(?downloadUrl), "http://internal-files/"))
+  } UNION {
+    ?s a eli:Expression.
+  }
+  
   OPTIONAL { ?s epvoc:expressionContent ?content . }
 }
 """
@@ -71,6 +93,7 @@ class SourceDoc(BaseModel):
     uri: str = Field(..., description="URI of the source document.")
     title: Optional[str] = Field(None, description="Document title.")
     content: Optional[str] = Field(None, description="Relevant excerpt used to generate the answer.")
+    download_url: Optional[str] = Field(None, description="Where to download the source.")
     score: Optional[float] = Field(None, description="Similarity score from semantic search.")
 
 
@@ -184,11 +207,14 @@ def fetch_documents(sources: List[SourceDoc]) -> List[SourceDoc]:
             continue
         title = binding.get("title", {}).get("value")
         content = binding.get("content", {}).get("value")
-        entry = doc_map.setdefault(subject, {"title": None, "content": None})
+        download_url = binding.get("downloadUrl", {}).get("value")
+        entry = doc_map.setdefault(subject, {"title": None, "content": None, "download_url": None})
         if content and not entry["content"]:
             entry["content"] = " ".join(content.split())
         if title and title.strip() and not (entry["title"] and entry["title"].strip()):
             entry["title"] = title.strip()
+        if download_url and download_url.strip() and not (entry["download_url"] and entry["download_url"].strip()):
+            entry["download_url"] = download_url.strip()
 
     # Fall back to a content snippet when no usable title was found.
     for entry in doc_map.values():
