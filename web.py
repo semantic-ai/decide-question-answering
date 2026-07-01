@@ -44,10 +44,12 @@ PREFIX eli: <http://data.europa.eu/eli/ontology#>
 PREFIX epvoc: <https://data.europarl.europa.eu/def/epvoc#>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 PREFIX oa: <http://www.w3.org/ns/oa#>
-SELECT ?s ?title ?content ?downloadUrl
+PREFIX mu: <http://mu.semte.ch/vocabularies/core/>
+SELECT ?s ?title ?content ?downloadUrl ?id
 WHERE {
   VALUES ?s { {{values}} }
-  ?s a eli:Expression .
+  ?s a eli:Expression ;
+     mu:uuid ?id .
   {
     ?s eli:title ?title .
   } UNION {
@@ -67,7 +69,7 @@ WHERE {
   } UNION {
     ?s a eli:Expression.
   }
-  
+
   OPTIONAL { ?s epvoc:expressionContent ?content . }
 }
 """
@@ -90,6 +92,7 @@ class AnswerRequest(BaseModel):
 
 
 class SourceDoc(BaseModel):
+    id: str = Field(..., description="uuid of the source document")
     uri: str = Field(..., description="URI of the source document.")
     title: Optional[str] = Field(None, description="Document title.")
     content: Optional[str] = Field(None, description="Relevant excerpt used to generate the answer.")
@@ -157,7 +160,7 @@ def semantic_search(question: str, top_n: int, local_authority: Optional[str] = 
     response.raise_for_status()
     data = response.json().get("data", [])
     results = [
-        SourceDoc(uri=doc["attributes"]["uri"], score=doc.get("score"))
+        SourceDoc(id=doc["id"], uri=doc["attributes"]["uri"], score=doc.get("score"))
         for doc in data if doc.get("attributes", {}).get("uri")
     ]
     results = [doc for doc in results if doc.score is None or doc.score >= MIN_SCORE]
@@ -221,7 +224,7 @@ def fetch_documents(sources: List[SourceDoc]) -> List[SourceDoc]:
         entry["title"] = _derive_title(entry["title"], entry["content"])
 
     return [
-        SourceDoc(uri=source.uri, score=source.score, **doc_map.get(source.uri, {}))
+        SourceDoc(id=source.id, uri=source.uri, score=source.score, **doc_map.get(source.uri, {}))
         for source in sources
     ]
 
