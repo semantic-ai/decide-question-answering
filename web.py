@@ -362,7 +362,7 @@ def store_question_answer(question_uuid: str, answer: str, sources: List[SourceD
     answer_uri  = f"{ANSWER_BASE_URI}{answer_uuid}"
     llm_uri     = f"urn:llm:{GENERATION_PROVIDER}:{GENERATION_MODEL}"
     triples = f"""
-        <{answer_uri}> a schema:Answer ;
+        <{answer_uri}> a schema:Answer, ext:AnnotationTarget ;
             mu:uuid       {sparql_escape_string(answer_uuid)} ;
             dct:created   {sparql_escape_datetime(created)} ;
             schema:text   {sparql_escape_string(answer)} ;
@@ -374,7 +374,7 @@ def store_question_answer(question_uuid: str, answer: str, sources: List[SourceD
         quotation_uuid = generate_uuid()
         quotation_uri  = f"{QUOTATION_BASE_URI}{quotation_uuid}"
         source.quotation_id = quotation_uuid
-        triples += f"\n        <{quotation_uri}> a schema:Quotation ;"
+        triples += f"\n        <{quotation_uri}> a schema:Quotation, ext:AnnotationTarget ;"
         triples += f"\n            oa:hasSource {sparql_escape_uri(source.uri)} ;"
         if source.score is not None:
             triples += f"\n            ext:confidence {sparql_escape(source.score)} ."
