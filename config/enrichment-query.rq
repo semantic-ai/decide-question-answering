@@ -3,11 +3,10 @@ PREFIX epvoc: <https://data.europarl.europa.eu/def/epvoc#>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 PREFIX oa: <http://www.w3.org/ns/oa#>
 PREFIX mu: <http://mu.semte.ch/vocabularies/core/>
-SELECT ?s ?title ?content ?downloadUrl ?id
+SELECT ?s ?title ?content ?downloadUrl
 WHERE {
   VALUES ?s { {{values}} }
-  ?s a eli:Expression ;
-     mu:uuid ?id .
+  ?s a eli:Expression .
   {
     ?s eli:title ?title .
   } UNION {
