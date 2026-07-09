@@ -98,7 +98,7 @@ class SourceDoc(BaseModel):
     content: Optional[str] = Field(None, description="Relevant excerpt used to generate the answer.")
     download_url: Optional[str] = Field(None, description="Where to download the source.")
     score: Optional[float] = Field(None, description="Similarity score from semantic search.")
-
+    quotation_id: Optional[str] = Field(None, description="uuid of the quotation citing this source in the answer.")
 
 class AnswerResponse(BaseModel):
     answer_id: Optional[str] = Field(None, description="uuid of the answer.")
@@ -374,6 +374,7 @@ def store_question_answer(question_uuid: str, answer: str, sources: List[SourceD
     for source in sources:
         quotation_uuid = generate_uuid()
         quotation_uri  = f"{QUOTATION_BASE_URI}{quotation_uuid}"
+        source.quotation_id = quotation_uuid
         triples += f"\n        <{quotation_uri}> a schema:Quotation ;"
         triples += f"\n            oa:hasSource {sparql_escape_uri(source.uri)} ;"
         if source.score is not None:
