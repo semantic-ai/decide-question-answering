@@ -375,6 +375,7 @@ def store_question_answer(question_uuid: str, answer: str, sources: List[SourceD
         quotation_uri  = f"{QUOTATION_BASE_URI}{quotation_uuid}"
         source.quotation_id = quotation_uuid
         triples += f"\n        <{quotation_uri}> a schema:Quotation, ext:AnnotationTarget ;"
+        triples += f"\n            mu:uuid {sparql_escape_string(source.quotation_id)} ;"
         triples += f"\n            oa:hasSource {sparql_escape_uri(source.uri)} ;"
         if source.score is not None:
             triples += f"\n            ext:confidence {sparql_escape(source.score)} ."
