@@ -44,6 +44,7 @@ PREFIX eli: <http://data.europa.eu/eli/ontology#>
 PREFIX epvoc: <https://data.europarl.europa.eu/def/epvoc#>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 PREFIX oa: <http://www.w3.org/ns/oa#>
+PREFIX mu: <http://mu.semte.ch/vocabularies/core/>
 SELECT ?s ?title ?content ?downloadUrl
 WHERE {
   VALUES ?s { {{values}} }
@@ -67,7 +68,7 @@ WHERE {
   } UNION {
     ?s a eli:Expression.
   }
-  
+
   OPTIONAL { ?s epvoc:expressionContent ?content . }
 }
 """
@@ -90,12 +91,13 @@ class AnswerRequest(BaseModel):
 
 
 class SourceDoc(BaseModel):
+    id: str = Field(..., description="uuid of the source document")
     uri: str = Field(..., description="URI of the source document.")
     title: Optional[str] = Field(None, description="Document title.")
     content: Optional[str] = Field(None, description="Relevant excerpt used to generate the answer.")
     download_url: Optional[str] = Field(None, description="Where to download the source.")
     score: Optional[float] = Field(None, description="Similarity score from semantic search.")
-
+    quotation_id: Optional[str] = Field(None, description="uuid of the quotation citing this source in the answer.")
 
 class AnswerResponse(BaseModel):
     answer_id: Optional[str] = Field(None, description="uuid of the answer.")
@@ -157,7 +159,7 @@ def semantic_search(question: str, top_n: int, local_authority: Optional[str] = 
     response.raise_for_status()
     data = response.json().get("data", [])
     results = [
-        SourceDoc(uri=doc["attributes"]["uri"], score=doc.get("score"))
+        SourceDoc(id=doc["id"], uri=doc["attributes"]["uri"], score=doc.get("score"))
         for doc in data if doc.get("attributes", {}).get("uri")
     ]
     results = [doc for doc in results if doc.score is None or doc.score >= MIN_SCORE]
@@ -221,7 +223,7 @@ def fetch_documents(sources: List[SourceDoc]) -> List[SourceDoc]:
         entry["title"] = _derive_title(entry["title"], entry["content"])
 
     return [
-        SourceDoc(uri=source.uri, score=source.score, **doc_map.get(source.uri, {}))
+        SourceDoc(id=source.id, uri=source.uri, score=source.score, **doc_map.get(source.uri, {}))
         for source in sources
     ]
 
@@ -360,7 +362,7 @@ def store_question_answer(question_uuid: str, answer: str, sources: List[SourceD
     answer_uri  = f"{ANSWER_BASE_URI}{answer_uuid}"
     llm_uri     = f"urn:llm:{GENERATION_PROVIDER}:{GENERATION_MODEL}"
     triples = f"""
-        <{answer_uri}> a schema:Answer ;
+        <{answer_uri}> a schema:Answer, ext:AnnotationTarget ;
             mu:uuid       {sparql_escape_string(answer_uuid)} ;
             dct:created   {sparql_escape_datetime(created)} ;
             schema:text   {sparql_escape_string(answer)} ;
@@ -371,7 +373,9 @@ def store_question_answer(question_uuid: str, answer: str, sources: List[SourceD
     for source in sources:
         quotation_uuid = generate_uuid()
         quotation_uri  = f"{QUOTATION_BASE_URI}{quotation_uuid}"
-        triples += f"\n        <{quotation_uri}> a schema:Quotation ;"
+        source.quotation_id = quotation_uuid
+        triples += f"\n        <{quotation_uri}> a schema:Quotation, ext:AnnotationTarget ;"
+        triples += f"\n            mu:uuid {sparql_escape_string(source.quotation_id)} ;"
         triples += f"\n            oa:hasSource {sparql_escape_uri(source.uri)} ;"
         if source.score is not None:
             triples += f"\n            ext:confidence {sparql_escape(source.score)} ."
