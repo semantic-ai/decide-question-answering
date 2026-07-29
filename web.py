@@ -12,7 +12,7 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List
-from escape_helpers import sparql_escape_uri, sparql_escape_string, sparql_escape_datetime, sparql_escape
+from escape_helpers import sparql_escape_uri, sparql_escape_string, sparql_escape_datetime, sparql_escape, sparql_escape_int, sparql_escape_float
 from helpers import query, generate_uuid, update
 from langchain.chat_models import init_chat_model
 from datetime import datetime, timezone
@@ -38,6 +38,10 @@ TITLE_FALLBACK_CHARS = int(os.environ.get("TITLE_FALLBACK_CHARS", "80"))
 QUESTION_BASE_URI = "http://data.lblod.info/id/questions/"
 ANSWER_BASE_URI   = "http://data.lblod.info/id/answers/"
 QUOTATION_BASE_URI = "http://data.lblod.info/id/quotations/"
+AI_CALL_BASE_URI = "http://data.lblod.info/id/ai-call/"
+QUESTION_ANSWERING_GRAPH = "http://mu.semte.ch/graphs/public/question-answering"
+
+MODEL_URI = f"urn:llm:{GENERATION_PROVIDER}:{GENERATION_MODEL}"
 
 DEFAULT_ENRICHMENT_SPARQL_TEMPLATE = """
 PREFIX eli: <http://data.europa.eu/eli/ontology#>
@@ -313,19 +317,86 @@ def _get_llm():
         timeout=GENERATION_TIMEOUT,
     )
 
+_PRICING_CACHE: Optional[dict] = None
+_PRICING_CACHE_TIME: float = 0
+_PRICING_CACHE_TTL: int = 3600  # 1 hour
+_OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+
+
+def _cache_expired() -> bool:
+    return time.monotonic() - _PRICING_CACHE_TIME > _PRICING_CACHE_TTL
+
+
+def get_openrouter_id(model_uri: str) -> Optional[str]:
+    """Look up the ext:openrouterId triple registered for a model URI, if any."""
+    result = query(f"""
+        PREFIX ext: <http://mu.semte.ch/vocabularies/ext/>
+        SELECT ?openrouterId WHERE {{
+            {sparql_escape_uri(model_uri)} ext:openrouterId ?openrouterId .
+        }}
+        LIMIT 1
+    """)
+    bindings = result.get("results", {}).get("bindings", [])
+    if bindings and "openrouterId" in bindings[0]:
+        return bindings[0]["openrouterId"]["value"]
+    return None
+
+
+def get_llm_pricing() -> dict:
+    """Fetch and cache OpenRouter's per-model pricing (USD per 1M tokens)."""
+    global _PRICING_CACHE, _PRICING_CACHE_TIME
+
+    if _PRICING_CACHE is not None and not _cache_expired():
+        return _PRICING_CACHE
+
+    try:
+        response = requests.get(_OPENROUTER_MODELS_URL, timeout=10)
+        response.raise_for_status()
+        pricing_map = {}
+        for model in response.json().get("data", []):
+            model_id = model.get("id")
+            pricing = model.get("pricing", {})
+            if not model_id:
+                continue
+            pricing_map[model_id] = {
+                "input_per_1m": float(pricing.get("prompt", 0)) * 1_000_000,
+                "output_per_1m": float(pricing.get("completion", 0)) * 1_000_000,
+            }
+        _PRICING_CACHE = pricing_map
+        _PRICING_CACHE_TIME = time.monotonic()
+        return pricing_map
+    except Exception as e:
+        print(f"Warning: Failed to fetch OpenRouter pricing: {e}")
+        return {}
+
+
+def calculate_cost(model_uri: str, tokens_in: int, tokens_out: int) -> float:
+    """Cost in USD for a generation call. Returns 0.0 for local/unregistered/unpriced models."""
+    openrouter_id = get_openrouter_id(model_uri)
+    if openrouter_id is None:
+        return 0.0
+
+    rates = get_llm_pricing().get(openrouter_id)
+    if rates is None:
+        print(f"Warning: No OpenRouter pricing found for '{openrouter_id}' (model '{model_uri}'). Cost set to 0.")
+        return 0.0
+
+    return (tokens_in / 1_000_000) * rates["input_per_1m"] + (tokens_out / 1_000_000) * rates["output_per_1m"]
+
+
 def store_question(request: AnswerRequest) -> str:
     """Persist a schema:Question to the triplestore and return the uuid for the question."""
     question_uuid = generate_uuid()
     question_uri  = f"{QUESTION_BASE_URI}{question_uuid}"
     created = datetime.now(timezone.utc)
     triples = f"""
-        <{question_uri}> a schema:Question ;
+        {sparql_escape_uri(question_uri)} a schema:Question ;
             mu:uuid       {sparql_escape_string(question_uuid)} ;
             dct:created   {sparql_escape_datetime(created)} ;
             schema:text   {sparql_escape_string(request.question)} .
     """
     if request.localAuthority:
-        triples += f"\n        <{question_uri}> ext:owningBody {sparql_escape_uri(request.localAuthority)} ."
+        triples += f"\n        {sparql_escape_uri(question_uri)} ext:owningBody {sparql_escape_uri(request.localAuthority)} ."
 
     update(f"""
         PREFIX schema: <http://schema.org/>
@@ -344,7 +415,7 @@ def store_question_prompt(question_uuid: str, prompt: str):
     """Persist the prompt in a known schema:Question."""
     question_uri  = f"{QUESTION_BASE_URI}{question_uuid}"
     triples = f"""
-        <{question_uri}> dct:description {sparql_escape_string(prompt)} .
+        {sparql_escape_uri(question_uri)} dct:description {sparql_escape_string(prompt)} .
     """
     update(f"""
         PREFIX dct:    <http://purl.org/dc/terms/>
@@ -354,32 +425,44 @@ def store_question_prompt(question_uuid: str, prompt: str):
         }}
     """)
 
-def store_question_answer(question_uuid: str, answer: str, sources: List[SourceDoc]) -> str:
-    """Persist the answer to a known schema:Question in the triplestore, and return the answer uuid."""
+def store_question_answer(
+    question_uuid: str,
+    answer: str,
+    sources: List[SourceDoc],
+    tokens_in: int,
+    tokens_out: int,
+    duration: float,
+) -> str:
+    """Persist the answer to a known schema:Question in the triplestore, and return the answer uuid.
+
+    Also records the generation call as an ext:AICall resource (tokens, duration, cost),
+    matching the data model proposed in decide-ai-service-base PR #18.
+    """
     question_uri  = f"{QUESTION_BASE_URI}{question_uuid}"
     created = datetime.now(timezone.utc)
     answer_uuid = generate_uuid()
     answer_uri  = f"{ANSWER_BASE_URI}{answer_uuid}"
-    llm_uri     = f"urn:llm:{GENERATION_PROVIDER}:{GENERATION_MODEL}"
+    call_uuid = generate_uuid()
+    call_uri  = f"{AI_CALL_BASE_URI}{call_uuid}"
     triples = f"""
-        <{answer_uri}> a schema:Answer, ext:AnnotationTarget ;
+        {sparql_escape_uri(answer_uri)} a schema:Answer, ext:AnnotationTarget ;
             mu:uuid       {sparql_escape_string(answer_uuid)} ;
             dct:created   {sparql_escape_datetime(created)} ;
             schema:text   {sparql_escape_string(answer)} ;
-            dct:creator  <{llm_uri}> .
-        <{question_uri}> schema:suggestedAnswer <{answer_uri}> .
+            dct:creator  {sparql_escape_uri(MODEL_URI)} .
+        {sparql_escape_uri(question_uri)} schema:suggestedAnswer {sparql_escape_uri(answer_uri)} .
     """
 
     for source in sources:
         quotation_uuid = generate_uuid()
         quotation_uri  = f"{QUOTATION_BASE_URI}{quotation_uuid}"
         source.quotation_id = quotation_uuid
-        triples += f"\n        <{quotation_uri}> a schema:Quotation, ext:AnnotationTarget ;"
+        triples += f"\n        {sparql_escape_uri(quotation_uri)} a schema:Quotation, ext:AnnotationTarget ;"
         triples += f"\n            mu:uuid {sparql_escape_string(source.quotation_id)} ;"
         triples += f"\n            oa:hasSource {sparql_escape_uri(source.uri)} ;"
         if source.score is not None:
             triples += f"\n            ext:confidence {sparql_escape(source.score)} ."
-        triples += f"\n        <{answer_uri}> schema:citation <{quotation_uri}> ."
+        triples += f"\n        {sparql_escape_uri(answer_uri)} schema:citation {sparql_escape_uri(quotation_uri)} ."
 
     update(f"""
         PREFIX schema: <http://schema.org/>
@@ -393,12 +476,40 @@ def store_question_answer(question_uuid: str, answer: str, sources: List[SourceD
           {triples}
         }}
     """)
+
+    # ext:AICall isn't covered by any SHACL shape in app-decide's authorization
+    # config, so the sparql-parser proxy can't route it to a graph on its own
+    # (unlike schema:Answer/Question/Quotation above). Same fix decide-ai-service-base
+    # PR #18 uses: name the graph explicitly and go in as sudo, bypassing that routing.
+    cost = calculate_cost(MODEL_URI, tokens_in, tokens_out)
+    update(f"""
+        PREFIX ext: <http://mu.semte.ch/vocabularies/ext/>
+        PREFIX mu:  <http://mu.semte.ch/vocabularies/core/>
+        PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+
+        INSERT DATA {{
+            GRAPH {sparql_escape_uri(QUESTION_ANSWERING_GRAPH)} {{
+                {sparql_escape_uri(answer_uri)} ext:performedAICall {sparql_escape_uri(call_uri)} .
+                {sparql_escape_uri(call_uri)} a ext:AICall ;
+                    mu:uuid       {sparql_escape_string(call_uuid)} ;
+                    ext:endpoint  {sparql_escape_string(GENERATION_ENDPOINT or GENERATION_PROVIDER)} ;
+                    ext:aiModel   {sparql_escape_uri(MODEL_URI)} ;
+                    ext:tokenIn   {sparql_escape_int(tokens_in)} ;
+                    ext:tokenOut  {sparql_escape_int(tokens_out)} ;
+                    ext:duration  {sparql_escape_float(duration)} ;
+                    ext:cost      {sparql_escape_float(cost)} .
+            }}
+        }}
+    """, sudo=True)
     return answer_uuid
 
 
 
-def generate_answer(question: str, retrieved_docs: List[SourceDoc], question_id: str) -> str:
-    """Generate an answer using the LLM with retrieved documents as context."""
+def generate_answer(question: str, retrieved_docs: List[SourceDoc], question_id: str) -> tuple[str, int, int, float]:
+    """Generate an answer using the LLM with retrieved documents as context.
+
+    Returns (answer, tokens_in, tokens_out, duration_seconds).
+    """
     doc_blocks = []
     for i, doc in enumerate(retrieved_docs, start=1):
         title = doc.title or doc.uri
@@ -432,8 +543,14 @@ def generate_answer(question: str, retrieved_docs: List[SourceDoc], question_id:
     "Answer:"
     )
     store_question_prompt(question_id, prompt)
+    start = time.monotonic()
     result = _get_llm().invoke(prompt)
-    return result.content
+    duration = time.monotonic() - start
+    usage = result.usage_metadata
+    if not usage:
+        print(f"Warning: No usage metadata returned by {GENERATION_PROVIDER}:{GENERATION_MODEL}; tokens recorded as 0.")
+        usage = {}
+    return result.content, usage.get("input_tokens", 0), usage.get("output_tokens", 0), duration
 
 
 # Orchestration
@@ -445,8 +562,8 @@ def process_request(request: AnswerRequest) -> AnswerResponse:
     if not sources: # when no relevant documents were found, no answer is generated, but the question is still stored
         return AnswerResponse(question_id=question_id, answer="No relevant documents were found to answer this question.", sources=[])
     sources = fetch_documents(sources)
-    answer = generate_answer(request.question, sources, question_id)
-    answer_id = store_question_answer(question_id, answer, sources)
+    answer, tokens_in, tokens_out, duration = generate_answer(request.question, sources, question_id)
+    answer_id = store_question_answer(question_id, answer, sources, tokens_in, tokens_out, duration)
     return AnswerResponse(question_id=question_id, answer_id=answer_id, answer=answer, sources=sources)
 
 
