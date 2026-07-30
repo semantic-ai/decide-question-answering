@@ -150,16 +150,3 @@ A threshold of `0.72–0.75` filters out clearly irrelevant questions while keep
 This service will store every question it receives, along with the answer it gave, including context such as the prompt and sourced that were used.
 Through sparql-parser in `app-decide`, it stores these in a named graph: `http://mu.semte.ch/graphs/public/question-answering`.
 To clear the question answering graph, run `CLEAR SILENT GRAPH <http://mu.semte.ch/graphs/public/question-answering>`
-
-### LLM cost and duration tracking
-
-Each answer also stores the generation call as an `ext:AICall` resource (linked from the answer via `ext:performedAICall`), with `ext:tokenIn`, `ext:tokenOut`, `ext:duration` (seconds) and `ext:cost` (USD). `ext:AICall` has no SHACL shape in app-decide's authorization config, so it's written straight into the `question-answering` graph via an explicit `GRAPH` clause and a `sudo` query, instead of relying on sparql-parser's shape-based routing.
-
-Cost is priced from [OpenRouter](https://openrouter.ai/api/v1/models)'s public pricing, keyed off an `ext:openrouterId` triple on the model's URI (`urn:llm:<provider>:<model>`). No triple means no price, so cost is `0.0`. To price a cloud model, register its OpenRouter id once:
-
-```sparql
-PREFIX ext: <http://mu.semte.ch/vocabularies/ext/>
-INSERT DATA {
-  <urn:llm:mistralai:mistral-medium-3-5> ext:openrouterId "mistralai/mistral-medium-3-5" .
-}
-```
