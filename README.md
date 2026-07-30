@@ -155,7 +155,7 @@ To clear the question answering graph, run `CLEAR SILENT GRAPH <http://mu.semte.
 
 Each answer also stores the generation call as an `ext:AICall` resource (linked from the answer via `ext:performedAICall`), with `ext:tokenIn`, `ext:tokenOut`, `ext:duration` (seconds) and `ext:cost` (USD). `ext:AICall` has no SHACL shape in app-decide's authorization config, so it's written straight into the `question-answering` graph via an explicit `GRAPH` clause and a `sudo` query, instead of relying on sparql-parser's shape-based routing.
 
-Cost is priced from [OpenRouter](https://openrouter.ai/api/v1/models)'s public pricing, keyed off an `ext:openrouterId` triple on the model's URI (`urn:llm:<provider>:<model>`). No triple means no price, so cost is `0.0`. To price a cloud model, register its OpenRouter id once:
+Cost is priced from [OpenRouter](https://openrouter.ai/api/v1/models)'s public pricing (USD), keyed off an `ext:openrouterId` triple on the model's URI (`urn:llm:<provider>:<model>`). No triple means no price, so cost is `0.0`. To price a cloud model, register its OpenRouter id once:
 
 ```sparql
 PREFIX ext: <http://mu.semte.ch/vocabularies/ext/>
