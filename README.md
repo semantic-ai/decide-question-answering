@@ -19,12 +19,18 @@ The generation step uses LangChain's [`init_chat_model`](https://python.langchai
 
 | Variable | Description | Default |
 |---|---|---|
-| `GENERATION_PROVIDER` | LangChain provider name (e.g. `ollama`, `mistralai`, `openai`) | `ollama` |
+| `GENERATION_PROVIDER` | LangChain provider name; `ollama` and `mistralai` | `ollama` |
 | `GENERATION_MODEL` | Model name for the selected provider | `mistral-nemo` |
 | `GENERATION_ENDPOINT` | Base URL for self-hosted providers (e.g. Ollama) | — |
 | `GENERATION_API_KEY` | API key for cloud providers | — |
 
-To switch providers, change `GENERATION_PROVIDER` and `GENERATION_MODEL` and install the matching `langchain-<provider>` package in `requirements.txt`. No code changes needed.
+The image pre-installs the DECIDe approved provider integrations, **Ollama** (local) and
+**Mistral AI** (cloud). To switch, change `GENERATION_PROVIDER` and `GENERATION_MODEL`:
+no `requirements.txt` edit, no image rebuild, no code changes.
+
+Any other provider LangChain supports will work too: add its `langchain-*` package to
+`requirements.txt` and rebuild the image, with the caveat that you then maintain that
+image yourself.
 
 **Default — Mistral cloud** The API key is read from a `.env`
 
