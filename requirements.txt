@@ -1,6 +1,6 @@
 requests == 2.34.2
 langchain == 1.3.0
-# DECIDe approved LLM providers - keep in sync across all AI services
+# DECIDe approved LLM providers
 langchain-ollama == 1.1.0
 langchain-mistralai == 1.1.4
 debugpy == 1.8.19
