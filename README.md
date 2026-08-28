@@ -113,7 +113,7 @@ curl -X POST http://localhost:8000/question-answering/answer -H "Content-Type: a
 
 | Variable | Description | Default |
 |---|---|---|
-| `SEARCH_API_URL` | mu-search raw-DSL search endpoint (accepts a raw Elasticsearch query) | `http://search:80/expressions/search` |
+| `SEARCH_API_URL` | mu-search raw-DSL search endpoint (accepts a raw Elasticsearch query) | `http://search:80/expressions/large-search` |
 | `EMBEDDING_API_URL` | Embedding service endpoint | — |
 | `GENERATION_TIMEOUT` | LLM request timeout in seconds | `300.0` |
 | `OLLAMA_PULL_TIMEOUT` | Timeout (seconds) for auto-pulling a missing Ollama model on first use | `1800.0` |
@@ -121,10 +121,8 @@ curl -X POST http://localhost:8000/question-answering/answer -H "Content-Type: a
 | `MAX_CONTENT_CHARS` | Max characters of document content passed to the LLM | `1000` |
 | `REQUEST_TIMEOUT` | Timeout for calls to search and embedding services (seconds) | `10.0` |
 | `MIN_SCORE` | Minimum similarity score to include a document | `0.72` |
-| `EMBEDDING_K` | Number of nearest neighbours to retrieve from the index | `30` |
 | `EMBEDDING_NUM_CANDIDATES` | Candidate pool size for kNN search | `100` |
 
-> **Note on `EMBEDDING_K` and `EMBEDDING_NUM_CANDIDATES`**: the `owning-body` (city) filter sits in the `bool` `filter` alongside the `knn`, so Elasticsearch pre-filters to that city before the kNN. A small `EMBEDDING_K` is therefore sufficient — it does **not** need to be inflated to survive a post-filter.
 
 ### Brief analysis on similarity scores
 
