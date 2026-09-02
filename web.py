@@ -140,9 +140,10 @@ def semantic_search(question: str, top_n: int, local_authority: Optional[str] = 
     URI is `attributes.uri`; the similarity score is the doc-level `score`.
     """
     embedding = embed_question(question)
+    embedding_key  = f":embedding,{top_n},{max(top_n,EMBEDDING_NUM_CANDIDATES)}:description-vector"
     mu_search_query = {
       "filter": {         
-        ":embedding:description-vector": f"{top_n}:{max(top_n,EMBEDDING_NUM_CANDIDATES)}:{",".join(map(str, embedding))}"
+        embedding_key: ",".join(map(str, embedding))
       }
     }
     if local_authority:
