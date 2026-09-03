@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 router = APIRouter()
 
-SEARCH_API_URL = os.environ.get("SEARCH_API_URL", "http://search/expressions/search")
+SEARCH_API_URL = os.environ.get("SEARCH_API_URL", "http://search/expressions/large-search")
 EMBEDDING_API_URL = os.environ.get("EMBEDDING_API_URL")
 GENERATION_ENDPOINT = os.environ.get("GENERATION_ENDPOINT")
 GENERATION_MODEL = os.environ.get("GENERATION_MODEL", "mistral-nemo")
@@ -31,7 +31,6 @@ OLLAMA_STARTUP_WAIT = float(os.environ.get("OLLAMA_STARTUP_WAIT", "60.0"))
 MAX_CONTENT_CHARS = int(os.environ.get("MAX_CONTENT_CHARS", "50000"))
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "10.0"))
 MIN_SCORE = float(os.environ.get("MIN_SCORE", "0.72"))
-EMBEDDING_K = int(os.environ.get("EMBEDDING_K", "30"))
 EMBEDDING_NUM_CANDIDATES = int(os.environ.get("EMBEDDING_NUM_CANDIDATES", "100"))
 TITLE_FALLBACK_CHARS = int(os.environ.get("TITLE_FALLBACK_CHARS", "80"))
 
@@ -141,22 +140,17 @@ def semantic_search(question: str, top_n: int, local_authority: Optional[str] = 
     URI is `attributes.uri`; the similarity score is the doc-level `score`.
     """
     embedding = embed_question(question)
-    bool_query = {
-        "must": [{
-            "knn": {
-                "field": "description-vector",
-                "query_vector": embedding,
-                "k": EMBEDDING_K,
-                "num_candidates": EMBEDDING_NUM_CANDIDATES,
-            }
-        }]
+    embedding_key  = f":embedding,{top_n},{max(top_n,EMBEDDING_NUM_CANDIDATES)}:description-vector"
+    mu_search_query = {
+      "filter": {         
+        embedding_key: ",".join(map(str, embedding))
+      }
     }
     if local_authority:
-        bool_query["filter"] = [{"term": {"owning-body": local_authority}}]
-    body = {"query": {"bool": bool_query}, "size": top_n}
+        mu_search_query["filter"][":term:owning-body"] = local_authority
     response = requests.post(
         SEARCH_API_URL,
-        json=body,
+        json=mu_search_query,
         headers={"Content-Type": "application/json"},
         timeout=REQUEST_TIMEOUT,
     )
