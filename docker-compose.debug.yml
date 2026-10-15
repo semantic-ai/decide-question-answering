@@ -17,6 +17,7 @@ services:
     environment:
       MODE: "development"
       SEARCH_API_URL: "http://search:80/expressions/large-search"
+      SEARCH_LEXICAL_API_URL: "http://search:80/expressions/search"
       LOG_SPARQL_ALL: "true"
       EMBEDDING_API_URL: "http://embedding:80/embed"
       MU_SPARQL_ENDPOINT: "http://database:8890/sparql"
@@ -30,6 +31,9 @@ services:
       # GENERATION_MODEL: "mistral-medium-3-5"
       # GENERATION_API_KEY: ${GENERATION_API_KEY}
       GENERATION_TIMEOUT: "300.0"
+      GENERATION_TEMPERATURE: "0.2"
+      # the reranker model is baked into the image (RERANK_MODEL_PATH is set by the Dockerfile)
+      RERANK_ENABLED: "true"
       MAX_CONTENT_CHARS: "50000"
       REQUEST_TIMEOUT: "10.0"
       ALLOW_MU_AUTH_SUDO: "true"
