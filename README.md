@@ -4,10 +4,38 @@ This service implements the HTTP flow for a local decision question answering RA
 
 The flow is based on the following:
 - Create an HTTP service that accepts a question in JSON format.
-- Call the embedding service to obtain an embedding for the question.
-- Use the embedding to perform a pre-filtered kNN search via mu-search's raw-DSL `/:type/search` endpoint (the `owning-body`/city filter sits in the `bool` `filter` next to the `knn`, so Elasticsearch pre-filters to that city) and return the top retrieved decisions together with their URIs.
+- Call the embedding service to obtain an embedding for the question (cached per normalized question).
+- Retrieve candidate decisions with a hybrid search: a pre-filtered kNN leg via mu-search's raw-DSL `/:type/search` endpoint (the `owning-body`/city filter sits in the `bool` `filter` next to the `knn`, so Elasticsearch pre-filters to that city) and a fuzzy BM25 leg via the `/:type/search` full-text endpoint (`multi_match` with `fuzziness: AUTO`), fused with Reciprocal Rank Fusion.
+- Re-rank the fused pool with a cross-encoder model baked into the container image.
 - Resolve the titles and content of the retrieved decisions from the SPARQL endpoint.
 - Pass the question plus the retrieved documents to an LLM to generate a response.
+
+### Hybrid retrieval & reranking
+
+Pure dense kNN retrieval is brittle to spelling mistakes: a single typo in the
+question ("sbusidies") shifts the embedding far enough that a completely
+different set of documents tops the list. The retrieval stage therefore combines
+two legs:
+
+1. **Dense leg** — the kNN search described above (up to 10 candidates; the
+   endpoint caps results at 10).
+2. **Lexical leg** — a fuzzy BM25 `multi_match` over the `description` fields
+   (`fuzziness: AUTO`), which anchors near-miss spellings to the documents that
+   use the correct term.
+
+The legs are fused with Reciprocal Rank Fusion (`RRF_K`), duplicates (identical
+description text) are collapsed, dense scores are still filtered by `MIN_SCORE`,
+and a multilingual cross-encoder (`BAAI/bge-reranker-v2-m3`) re-scores the fused
+pool against the question. The cross-encoder is loaded at startup from
+`RERANK_MODEL_PATH` and is baked into the image at build time (pinned model
+revision, see `Dockerfile`), so containers start without any runtime downloads.
+Every step is fail-soft: a failed leg, a missing model, or a failed prediction
+falls back to the remaining retrieval order instead of failing the request.
+
+Note: the lexical leg is a global full-text search — the mu-search endpoint does
+not accept a filter clause — so its results are filtered by `owning-body` in
+this service. In a multi-authority corpus the documents of one authority rank
+deep in the global BM25 results, which is why `LEXICAL_SIZE` defaults to 200.
 
 ### Disclaimer
 
@@ -114,14 +142,24 @@ curl -X POST http://localhost:8000/question-answering/answer -H "Content-Type: a
 | Variable | Description | Default |
 |---|---|---|
 | `SEARCH_API_URL` | mu-search raw-DSL search endpoint (accepts a raw Elasticsearch query) | `http://search:80/expressions/large-search` |
+| `SEARCH_LEXICAL_API_URL` | mu-search full-text endpoint used for the fuzzy BM25 leg | `http://search:80/expressions/search` |
 | `EMBEDDING_API_URL` | Embedding service endpoint | — |
 | `GENERATION_TIMEOUT` | LLM request timeout in seconds | `300.0` |
+| `GENERATION_TEMPERATURE` | Sampling temperature for answer generation | `0.2` |
 | `OLLAMA_PULL_TIMEOUT` | Timeout (seconds) for auto-pulling a missing Ollama model on first use | `1800.0` |
 | `OLLAMA_STARTUP_WAIT` | Seconds to wait at startup for Ollama to become reachable before failing | `60.0` |
 | `MAX_CONTENT_CHARS` | Max characters of document content passed to the LLM | `1000` |
 | `REQUEST_TIMEOUT` | Timeout for calls to search and embedding services (seconds) | `10.0` |
-| `MIN_SCORE` | Minimum similarity score to include a document | `0.72` |
-| `EMBEDDING_NUM_CANDIDATES` | Candidate pool size for kNN search | `100` |
+| `MIN_SCORE` | Minimum dense similarity score to include a document | `0.72` |
+| `EMBEDDING_NUM_CANDIDATES` | Candidate pool size (num_candidates) for kNN search | `100` |
+| `HYBRID_ENABLED` | Use hybrid (dense + fuzzy BM25) retrieval; `false` falls back to dense-only | `true` |
+| `RRF_K` | RRF constant for fusing the retrieval legs | `60` |
+| `RRF_POOL_SIZE` | Max documents in the fused pool before reranking | `15` |
+| `LEXICAL_SIZE` | Max documents requested from the fuzzy BM25 leg (before the `owning-body` post-filter) | `200` |
+| `RERANK_ENABLED` | Load and use the cross-encoder reranker | `true` |
+| `RERANK_MODEL_PATH` | Local path of the cross-encoder model (set by the image) | — |
+| `RERANK_MAX_CHARS` | Max characters of document description fed to the cross-encoder | `512` |
+| `EMBEDDING_CACHE_MAX` | Max cached question embeddings | `256` |
 
 
 ### Brief analysis on similarity scores
@@ -138,10 +176,6 @@ Top 50 results, `k=50`, `num_candidates=400`:
 | "waar moet ik op letten als ik een halloweentocht wil organiseren?" | 0.769–0.817 |
 
 A threshold of `0.72–0.75` filters out clearly irrelevant questions while keeping relevant ones. The current default is `0.72`.
-
-### Possible improvements
-
-- **Cross-encoder reranking**: Add a reranking step between retrieval and generation. A cross-encoder reads the question and each document side by side and outputs a relevance score — more accurate than embeddings but slower. Use it as a second stage to re-score and filter after fast retrieval.
 
 ### Storage of questions and answers
 
