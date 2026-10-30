@@ -10,12 +10,14 @@ import requests
 from fastapi import APIRouter
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse
+from functools import lru_cache
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Dict, List, Optional
 from escape_helpers import sparql_escape_uri, sparql_escape_string, sparql_escape_datetime, sparql_escape, sparql_escape_int, sparql_escape_float
 from helpers import query, generate_uuid, update
 from langchain.chat_models import init_chat_model
 from datetime import datetime, timezone
+from search_hybrid import dedupe, normalize_query, query_hash, rrf_fuse
 
 router = APIRouter()
 
@@ -33,6 +35,18 @@ REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "10.0"))
 MIN_SCORE = float(os.environ.get("MIN_SCORE", "0.72"))
 EMBEDDING_NUM_CANDIDATES = int(os.environ.get("EMBEDDING_NUM_CANDIDATES", "100"))
 TITLE_FALLBACK_CHARS = int(os.environ.get("TITLE_FALLBACK_CHARS", "80"))
+SEARCH_LEXICAL_API_URL = os.environ.get("SEARCH_LEXICAL_API_URL", "http://search/expressions/search")
+HYBRID_ENABLED = os.environ.get("HYBRID_ENABLED", "true").lower() in ("true", "1", "yes")
+RRF_K = int(os.environ.get("RRF_K", "60"))
+RRF_POOL_SIZE = int(os.environ.get("RRF_POOL_SIZE", "15"))
+# 200 (not 50): the lexical leg is not authority-scoped on the server side, so
+# in a multi-authority corpus the documents of one authority only appear deep
+# in the global BM25 ranking and a small page returns almost none of them.
+LEXICAL_SIZE = int(os.environ.get("LEXICAL_SIZE", "200"))
+RERANK_ENABLED = os.environ.get("RERANK_ENABLED", "true").lower() in ("true", "1", "yes")
+RERANK_MAX_CHARS = int(os.environ.get("RERANK_MAX_CHARS", "512"))
+EMBEDDING_CACHE_MAX = int(os.environ.get("EMBEDDING_CACHE_MAX", "256"))
+GENERATION_TEMPERATURE = float(os.environ.get("GENERATION_TEMPERATURE", "0.2"))
 
 QUESTION_BASE_URI = "http://data.lblod.info/id/questions/"
 ANSWER_BASE_URI   = "http://data.lblod.info/id/answers/"
@@ -109,8 +123,25 @@ class AnswerResponse(BaseModel):
     sources: List[SourceDoc] = Field(..., description="Documents used to generate the answer.")
 
 
+@lru_cache(maxsize=EMBEDDING_CACHE_MAX)
+def _embed_normalized(normalized_question: str) -> tuple:
+    response = requests.post(
+        EMBEDDING_API_URL,
+        json={"input": normalized_question},
+        headers={"Content-Type": "application/json"},
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    return tuple(response.json().get("embedding", []))
+
+
 def embed_question(question: str) -> List[float]:
     """Call the embedding service to obtain an embedding for the question.
+
+    The question is normalized first (NFKC + whitespace collapse) and the
+    result is cached, so repeated or near-duplicate questions skip the
+    embedding service. The embedding service is deterministic, so the cache
+    never returns a different vector than a live call would.
 
     Args:
         question (str): The user question to embed.
@@ -118,33 +149,23 @@ def embed_question(question: str) -> List[float]:
     Returns:
         List[float]: The embedding vector returned by the embedding service.
     """
-    response = requests.post(
-        EMBEDDING_API_URL,
-        json={"input": question},
-        headers={"Content-Type": "application/json"},
-        timeout=REQUEST_TIMEOUT,
-    )
-    response.raise_for_status()
-    data = response.json()
-    return data.get("embedding", [])
+    return list(_embed_normalized(normalize_query(question)))
 
 
-def semantic_search(question: str, top_n: int, local_authority: Optional[str] = None) -> List[SourceDoc]:
-    """Perform semantic search and return source documents.
+def _dense_leg(embedding: List[float], local_authority: Optional[str]) -> List[dict]:
+    """Dense retrieval leg: pre-filtered kNN via mu-search's large-search endpoint.
 
-    Sends a pre-filtered kNN as a raw Elasticsearch query to mu-search's
-    `/:type/search` endpoint (so mu-auth / allowed-groups still apply and we don't
-    hardcode the index). When a local authority URI is provided, its `owning-body`
-    term sits in the bool `filter` next to the `knn` in `must`, so Elasticsearch
-    pre-filters to that authority's documents and a small `k` suffices. The resource
-    URI is `attributes.uri`; the similarity score is the doc-level `score`.
+    Sends a raw Elasticsearch query so mu-auth / allowed-groups still apply and the
+    index is not hardcoded. When a local authority URI is provided, its `owning-body`
+    term sits in the `filter` next to the embedding, so Elasticsearch pre-filters to
+    that authority's documents. The endpoint caps the number of returned documents
+    at 10 regardless of the requested size.
     """
-    embedding = embed_question(question)
-    embedding_key  = f":embedding,{top_n},{max(top_n,EMBEDDING_NUM_CANDIDATES)}:description-vector"
+    embedding_key = f":embedding,10,{max(10, EMBEDDING_NUM_CANDIDATES)}:description-vector"
     mu_search_query = {
-      "filter": {         
-        embedding_key: ",".join(map(str, embedding))
-      }
+        "filter": {
+            embedding_key: ",".join(map(str, embedding))
+        }
     }
     if local_authority:
         mu_search_query["filter"][":term:owning-body"] = local_authority
@@ -155,13 +176,190 @@ def semantic_search(question: str, top_n: int, local_authority: Optional[str] = 
         timeout=REQUEST_TIMEOUT,
     )
     response.raise_for_status()
-    data = response.json().get("data", [])
-    results = [
-        SourceDoc(id=doc["id"], uri=doc["attributes"]["uri"], score=doc.get("score"))
-        for doc in data if doc.get("attributes", {}).get("uri")
+    return response.json().get("data", [])
+
+
+def _lexical_leg(question: str, size: int, local_authority: Optional[str]) -> List[dict]:
+    """Lexical retrieval leg: fuzzy BM25 full-text search via mu-search's search endpoint.
+
+    `fuzziness: AUTO` anchors near-miss spellings (e.g. "sbusidies") to the documents
+    that use the correct term. The endpoint does not accept filter clauses, so the
+    owning-body filter is applied client-side.
+    """
+    payload = {
+        "query": {
+            "multi_match": {
+                "query": normalize_query(question),
+                "fields": ["description.nl", "description.de", "description.default"],
+                "type": "best_fields",
+                "fuzziness": "AUTO",
+            }
+        },
+        "size": size,
+    }
+    response = requests.post(
+        SEARCH_LEXICAL_API_URL,
+        json=payload,
+        headers={"Content-Type": "application/json"},
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    docs = response.json().get("data", [])
+    if local_authority:
+        docs = [doc for doc in docs if doc.get("attributes", {}).get("owning-body") == local_authority]
+    return docs[:size]
+
+
+def _description_text(attributes: dict) -> str:
+    """Return the document description as plain text (nl, then de, then default)."""
+    description = attributes.get("description", "")
+    if isinstance(description, str):
+        return " ".join(description.split())
+    if isinstance(description, dict):
+        for language in ("nl", "de", "default"):
+            value = description.get(language)
+            if value and str(value).strip():
+                return " ".join(str(value).split())
+    return ""
+
+
+def _pool_dedupe_key(doc: dict) -> str:
+    """Dedupe key for fused pool documents.
+
+    Documents with identical description text are the same underlying decision
+    indexed multiple times; they collapse to one entry. Documents without a
+    description are keyed by id so unrelated empty documents survive.
+    """
+    text = _description_text(doc.get("attributes", {}))
+    return query_hash(text) if text else f"doc:{doc.get('id')}"
+
+
+def _fuse_pools(legs: List[List[dict]]) -> List[dict]:
+    """Fuse retrieval legs with Reciprocal Rank Fusion and collapse duplicates.
+
+    Returns the fused pool as raw mu-search documents, best first.
+    """
+    doc_by_id: Dict[str, dict] = {}
+    for leg in legs:
+        for doc in leg:
+            doc_id = doc.get("id")
+            if doc_id:
+                doc_by_id.setdefault(doc_id, doc)
+    rankings: List[List[str]] = [[str(doc.get("id")) for doc in leg if doc.get("id")] for leg in legs]
+    fused = rrf_fuse(rankings, k=RRF_K, limit=RRF_POOL_SIZE)
+    pool = [doc_by_id[doc_id] for doc_id, _ in fused if doc_id in doc_by_id]
+    return dedupe(pool, key=_pool_dedupe_key)
+
+
+def semantic_search(question: str, top_n: int, local_authority: Optional[str] = None) -> List[SourceDoc]:
+    """Retrieve source documents for a question via hybrid search.
+
+    A dense leg (kNN through the large-search endpoint) and a fuzzy BM25 leg
+    (through the search endpoint) are fused with Reciprocal Rank Fusion, so a
+    near-miss spelling in the question no longer changes which documents are
+    retrieved. The fused pool is deduplicated on identical description text and
+    filtered by MIN_SCORE (dense scores only), then re-ranked with the
+    cross-encoder when a reranker is loaded. Returns the top_n documents.
+
+    Either leg may fail without failing the whole request; only when both legs
+    fail is the error raised.
+    """
+    embedding = embed_question(question)
+    if HYBRID_ENABLED:
+        dense_docs: List[dict] = []
+        lexical_docs: List[dict] = []
+        leg_errors: List[Exception] = []
+        try:
+            dense_docs = _dense_leg(embedding, local_authority)
+        except Exception as exc:
+            leg_errors.append(exc)
+            print(f"Warning: dense retrieval leg failed: {exc}", flush=True)
+        try:
+            lexical_docs = _lexical_leg(question, max(LEXICAL_SIZE, top_n * 3), local_authority)
+        except Exception as exc:
+            leg_errors.append(exc)
+            print(f"Warning: lexical retrieval leg failed: {exc}", flush=True)
+        if len(leg_errors) == 2:
+            raise leg_errors[0]
+        if leg_errors:
+            pool = _fuse_pools([dense_docs or lexical_docs])
+        else:
+            pool = _fuse_pools([dense_docs, lexical_docs])
+    else:
+        dense_docs = _dense_leg(embedding, local_authority)
+        lexical_docs = []
+        pool = _fuse_pools([dense_docs])
+
+    dense_ids = {doc.get("id") for doc in dense_docs}
+    eligible: List[dict] = []
+    for doc in pool:
+        doc_id = doc.get("id")
+        score = doc.get("score") if doc_id in dense_ids else None
+        if score is not None and score < MIN_SCORE:
+            continue
+        if doc.get("attributes", {}).get("uri"):
+            eligible.append(doc)
+    eligible = rerank_documents(question, eligible)
+    return [
+        SourceDoc(
+            id=doc.get("id"),
+            uri=doc["attributes"]["uri"],
+            score=doc.get("score") if doc.get("id") in dense_ids else None,
+        )
+        for doc in eligible[:top_n]
     ]
-    results = [doc for doc in results if doc.score is None or doc.score >= MIN_SCORE]
-    return results[:top_n]
+
+
+_RERANKER = None
+
+
+def _ensure_reranker() -> None:
+    """Load the cross-encoder reranker from RERANK_MODEL_PATH at startup.
+
+    The model is baked into the container image (see Dockerfile), so loading is
+    a local file read with no network access. On any failure the service keeps
+    running without reranking: the RRF order of the retrieval pool is used
+    instead.
+    """
+    global _RERANKER
+    if not RERANK_ENABLED:
+        print("Reranking disabled (RERANK_ENABLED is false).", flush=True)
+        return
+    model_path = os.environ.get("RERANK_MODEL_PATH", "")
+    if not model_path or not os.path.isdir(model_path):
+        print(f"Warning: RERANK_MODEL_PATH '{model_path or '(not set)'}' is missing; reranking disabled.", flush=True)
+        return
+    try:
+        from sentence_transformers import CrossEncoder
+        _RERANKER = CrossEncoder(model_path)
+        print(f"Cross-encoder reranker loaded from {model_path}.", flush=True)
+    except Exception as exc:
+        print(f"Warning: failed to load cross-encoder reranker: {exc}; reranking disabled.", flush=True)
+
+
+def rerank_documents(question: str, docs: List[dict]) -> List[dict]:
+    """Re-order a retrieval pool with the cross-encoder.
+
+    Each document is scored against the question using its description text
+    (truncated to RERANK_MAX_CHARS). Falls back to the input order when the
+    reranker is unavailable or prediction fails.
+    """
+    if _RERANKER is None or len(docs) < 2:
+        return docs
+    pairs = [
+        (normalize_query(question), _description_text(doc.get("attributes", {}))[:RERANK_MAX_CHARS])
+        for doc in docs
+    ]
+    try:
+        scores = _RERANKER.predict(pairs)
+    except Exception as exc:
+        print(f"Warning: reranker prediction failed, keeping retrieval order: {exc}", flush=True)
+        return docs
+    order = sorted(
+        range(len(docs)),
+        key=lambda i: (-float(scores[i]), docs[i].get("attributes", {}).get("uri", "")),
+    )
+    return [docs[i] for i in order]
 
 
 def _derive_title(title: Optional[str], content: Optional[str]) -> Optional[str]:
@@ -309,6 +507,7 @@ def _get_llm():
         base_url=GENERATION_ENDPOINT,
         api_key=GENERATION_API_KEY,
         timeout=GENERATION_TIMEOUT,
+        temperature=GENERATION_TEMPERATURE,
     )
 
 _PRICING_CACHE: Optional[dict] = None
@@ -453,9 +652,9 @@ def store_question_answer(
         source.quotation_id = quotation_uuid
         triples += f"\n        {sparql_escape_uri(quotation_uri)} a schema:Quotation, ext:AnnotationTarget ;"
         triples += f"\n            mu:uuid {sparql_escape_string(source.quotation_id)} ;"
-        triples += f"\n            oa:hasSource {sparql_escape_uri(source.uri)} ;"
+        triples += f"\n            oa:hasSource {sparql_escape_uri(source.uri)} ."
         if source.score is not None:
-            triples += f"\n            ext:confidence {sparql_escape(source.score)} ."
+            triples += f"\n        {sparql_escape_uri(quotation_uri)} ext:confidence {sparql_escape(source.score)} ."
         triples += f"\n        {sparql_escape_uri(answer_uri)} schema:citation {sparql_escape_uri(quotation_uri)} ."
 
     update(f"""
@@ -581,3 +780,5 @@ def answer_endpoint(request: AnswerRequest):
 
 if GENERATION_PROVIDER == "ollama" and GENERATION_ENDPOINT:
     _ensure_ollama_model()
+
+_ensure_reranker()

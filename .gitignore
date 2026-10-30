@@ -1,4 +1,6 @@
 # User-specific stuff:
+.idea/decide-question-answering.iml
+.idea/.gitignore
 .idea/workspace.xml
 .idea/tasks.xml
 .idea/dictionaries
